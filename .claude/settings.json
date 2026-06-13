@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(& \"c:\\\\claude proyectos\\\\Dashboard Sucesion\\\\.venv\\\\Scripts\\\\python.exe\" -m pip list 2>&1)",
+      "PowerShell(& \"c:\\\\claude proyectos\\\\Dashboard Sucesion\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install pyinstaller 2>&1)",
+      "PowerShell(node --version)",
+      "PowerShell(npm --version)",
+      "Read(//c/Program Files \\(x86\\)/Inno Setup 6/**)",
+      "PowerShell(& \"C:\\\\Program Files \\(x86\\)\\\\Inno Setup 6\\\\ISCC.exe\" \"c:\\\\claude proyectos\\\\vacaciones-suplencias\\\\instalador\\\\vacaciones-suplencias.iss\" 2>&1)",
+      "PowerShell(Start-Process \"http://localhost:3000\")",
+      "PowerShell(Set-Location \"c:\\\\claude proyectos\\\\vacaciones-suplencias\"; $env:DATABASE_URL = \"file:./prisma/vacaciones.db\"; npm run db:seed 2>&1)",
+      "PowerShell(Set-Location \"c:\\\\claude proyectos\\\\vacaciones-suplencias\"; $env:DATABASE_URL = \"file:C:/claude proyectos/vacaciones-suplencias/prisma/vacaciones.db\"; npx ts-node -P tsconfig.seed.json prisma/seed.ts 2>&1)"
+    ]
+  }
+}
