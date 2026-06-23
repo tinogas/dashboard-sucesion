@@ -2,6 +2,9 @@
   "permissions": {
     "allow": [
       "PowerShell(Get-Item \"c:\\\\claude proyectos\\\\vacaciones-suplencias\\\\prisma\\\\vacaciones.db\" | Select-Object Name, @{N='KB';E={[math]::Round\\($_.Length/1KB,0\\)}}, LastWriteTime)"
+    ],
+    "additionalDirectories": [
+      "C:\\xampp\\htdocs\\inventario\\api"
     ]
   }
 }

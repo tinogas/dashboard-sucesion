@@ -268,11 +268,14 @@ def add_data_table(doc, headers: list, rows: list, col_widths=None):
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
     tbl.style     = "Table Grid"
 
+    # 7pt para tablas anchas (5+ columnas), 8pt para las demás
+    fsize = 7 if n_cols >= 5 else 8
+
     # Encabezados
     for ci, hdr in enumerate(headers):
         cell = tbl.cell(0, ci)
         set_cell_bg(cell, "2E86C1")
-        cell_text(cell, hdr, bold=True, size=8, color="#FFFFFF", align=WD_ALIGN_PARAGRAPH.CENTER)
+        cell_text(cell, hdr, bold=True, size=fsize, color="#FFFFFF", align=WD_ALIGN_PARAGRAPH.CENTER)
 
     # Datos
     for ri, row_data in enumerate(rows):
@@ -285,14 +288,18 @@ def add_data_table(doc, headers: list, rows: list, col_widths=None):
             cell = tbl.cell(ri+1, ci)
             set_cell_bg(cell, bg)
             align = WD_ALIGN_PARAGRAPH.RIGHT if ci > 0 else WD_ALIGN_PARAGRAPH.LEFT
-            cell_text(cell, val, bold=(is_total or is_subtotal), size=8,
+            cell_text(cell, val, bold=(is_total or is_subtotal), size=fsize,
                       color=txt_color, align=align)
 
-    # Anchos de columna
-    if col_widths:
-        for ci, w in enumerate(col_widths):
-            for row in tbl.rows:
-                row.cells[ci].width = Cm(w)
+    # Anchos de columna — siempre se aplican; auto-calcula si no se especifican
+    if not col_widths:
+        _total = 16.0
+        _first = min(5.0, round(_total * 0.35, 2))
+        _rest  = round((_total - _first) / max(n_cols - 1, 1), 2)
+        col_widths = [_first] + [_rest] * (n_cols - 1)
+    for ci, w in enumerate(col_widths):
+        for row in tbl.rows:
+            row.cells[ci].width = Cm(w)
     return tbl
 
 def add_image(doc, buf: io.BytesIO, width=Inches(6)):
@@ -324,12 +331,12 @@ def insertar_hoja_control(doc, sheet_name):
     if not all_rows:
         return
 
-    # Formato peso: $ 4,800.00
+    # Formato peso: $4,800.00 (sin espacio para que quepa en columnas angostas)
     def fmt_peso(v):
         if v is None: return "—"
         if isinstance(v, (int, float)):
             if v == 0: return "—"
-            return f"$ {v:,.2f}"
+            return f"${v:,.2f}"
         return str(v).strip() or "—"
 
     # Columnas a mostrar por año (índices en la fila original de 14 cols)
@@ -419,16 +426,16 @@ def insertar_hoja_control(doc, sheet_name):
     tbl.style = 'Table Grid'
     tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-    # Anchos proporcionales al contenido: entity ancho, meses iguales, total medio
-    entity_cm = 4.5
-    total_cm  = 2.5
-    month_cm  = round((16.5 - entity_cm - total_cm) / max(n_cols - 2, 1), 3)
+    # Anchos proporcionales al contenido dentro de 16 cm disponibles
+    entity_cm = 3.5
+    total_cm  = 2.2
+    month_cm  = round((16.0 - entity_cm - total_cm) / max(n_cols - 2, 1), 3)
     col_w = [entity_cm] + [month_cm] * (n_cols - 2) + [total_cm]
 
     for ri, (rtype, row_data) in enumerate(flat):
         bg    = BG[rtype]
         bold  = rtype in DARK
-        size  = 9 if rtype in ('title', 'gran_total') else (8 if rtype in ('year_hdr', 'col_hdr') else 8)
+        size  = 9 if rtype in ('title', 'gran_total') else (8 if rtype in ('year_hdr', 'col_hdr') else 7)
         color = 'FFFFFF' if rtype in DARK else '333333'
 
         if rtype in MERGE:
@@ -530,7 +537,7 @@ def insertar_detalle_registro(doc):
         doc.add_paragraph("[Sin datos en la hoja Detalle Registro]")
         return
 
-    COL_W = [4.5, 1.3, 1.5, 2.5, 2.5, 4.2]   # Inmueble|Año|Mes|Ingreso|Egreso|Concepto
+    COL_W = [4.0, 1.3, 1.5, 2.5, 2.5, 4.2]   # Inmueble|Año|Mes|Ingreso|Egreso|Concepto (total 16.0 cm)
     HDR   = ["Inmueble", "Año", "Mes", "Ingreso", "Egreso", "Concepto"]
 
     for reg_name, rows_data, sub_ing, sub_egr in sections:
@@ -791,22 +798,31 @@ def generate_report(df: pd.DataFrame, output: str):
     insertar_hoja_control(doc, "Control Rentas")
     doc.add_paragraph()
 
-    # Mensual global
-    add_heading(doc, "Ingresos Mensuales Acumulados (todos los años)", level=2)
-    monthly_global = monthly_df(tmp)
+    # Mensual filtrado por RENTA (mismo universo que Control de Rentas)
+    add_heading(doc, "Ingresos Mensuales — Rentas", level=2)
+    if reg_col:
+        _mask_renta = tmp[reg_col].astype(str).str.strip().str.lower() == "renta"
+        if _mask_renta.sum() == 0:
+            _mask_renta = tmp[reg_col].astype(str).str.strip().str.lower().str.contains("renta", regex=False)
+        tmp_renta = tmp[_mask_renta]
+    else:
+        tmp_renta = tmp
     hdr_m = ["Mes"] + [str(int(a)) for a in años] + ["Total"]
+    año_acum_ing = {a: 0.0 for a in años}
     rows_m = []
     for m in range(1, 13):
         row_vals = [MESES_LARGO[m-1]]
         row_total = 0.0
         for a in años:
-            v = tmp[(tmp["_año"]==a) & (tmp["_mes"]==m)]["_ing"].sum()
+            v = float(tmp_renta[(tmp_renta["_año"]==a) & (tmp_renta["_mes"]==m)]["_ing"].sum())
             row_vals.append(money(v))
             row_total += v
+            año_acum_ing[a] += v
         row_vals.append(money(row_total))
         rows_m.append(row_vals)
-    col_totals = [money(tmp[tmp["_año"]==a]["_ing"].sum()) for a in años]
-    rows_m.append(["TOTAL"] + col_totals + [money(total_ing)])
+    gran_total_ing = sum(año_acum_ing.values())
+    col_totals = [money(año_acum_ing[a]) for a in años]
+    rows_m.append(["TOTAL"] + col_totals + [money(gran_total_ing)])
     add_data_table(doc, hdr_m, rows_m)
     doc.add_paragraph()
     doc.add_page_break()
@@ -828,19 +844,34 @@ def generate_report(df: pd.DataFrame, output: str):
         add_data_table(doc, hdr_egr, rows_egr, col_widths=[5, 4, 3])
         doc.add_paragraph()
 
-    add_heading(doc, "Egresos Mensuales Acumulados (todos los años)", level=2)
+    # Egresos filtrados a los mismos tipos que tienen Control (luz, predial, agua, despacho, impuestos)
+    add_heading(doc, "Egresos Mensuales — Control de Egresos", level=2)
+    _egr_tipos = ["luz", "predial", "agua", "honorarios despacho", "impuestos"]
+    if reg_col:
+        _mask_egr = pd.Series(False, index=tmp.index)
+        for _tipo in _egr_tipos:
+            _m = tmp[reg_col].astype(str).str.strip().str.lower() == _tipo.lower()
+            if _m.sum() == 0:
+                _m = tmp[reg_col].astype(str).str.strip().str.lower().str.contains(_tipo.lower(), regex=False)
+            _mask_egr |= _m
+        tmp_egr_ctrl = tmp[_mask_egr]
+    else:
+        tmp_egr_ctrl = tmp
+    año_acum_egr = {a: 0.0 for a in años}
     rows_egr_m = []
     for m in range(1, 13):
         row_vals = [MESES_LARGO[m-1]]
         row_total = 0.0
         for a in años:
-            v = tmp[(tmp["_año"]==a) & (tmp["_mes"]==m)]["_egr"].sum()
+            v = float(tmp_egr_ctrl[(tmp_egr_ctrl["_año"]==a) & (tmp_egr_ctrl["_mes"]==m)]["_egr"].sum())
             row_vals.append(money(v))
             row_total += v
+            año_acum_egr[a] += v
         row_vals.append(money(row_total))
         rows_egr_m.append(row_vals)
-    col_egr = [money(tmp[tmp["_año"]==a]["_egr"].sum()) for a in años]
-    rows_egr_m.append(["TOTAL"] + col_egr + [money(total_egr)])
+    gran_total_egr = sum(año_acum_egr.values())
+    col_egr = [money(año_acum_egr[a]) for a in años]
+    rows_egr_m.append(["TOTAL"] + col_egr + [money(gran_total_egr)])
     add_data_table(doc, hdr_m, rows_egr_m)
     doc.add_paragraph()
 
