@@ -1007,6 +1007,151 @@ def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame):
           f"({len(data)} registros, {len(registros)} tipos de registro)")
 
 
+# ── Detalle por Propiedad (una hoja por cada inmueble en renta) ────────────────
+_HOJAS_FIJAS = {
+    "movimientos", "dashboard", "_aux", "informe dinámico", "informe contable",
+    "detalle registro",
+} | {tab_name.lower() for tab_name, *_ in CONTROL_TABS}
+
+
+def _nombre_hoja_valido(nombre: str, usados: set) -> str:
+    """Sanitiza nombre para usarlo como nombre de hoja de Excel: quita
+    caracteres invalidos ( : \\ / ? * [ ] ), recorta a 31 caracteres y
+    evita duplicados agregando un sufijo numerico."""
+    limpio = re.sub(r'[:\\/?*\[\]]', ' ', str(nombre)).strip()
+    limpio = re.sub(r'\s+', ' ', limpio) or "Propiedad"
+    base = limpio[:31]
+
+    candidato = base
+    i = 2
+    while candidato.lower() in usados:
+        sufijo = f" ({i})"
+        candidato = base[:31 - len(sufijo)] + sufijo
+        i += 1
+
+    usados.add(candidato.lower())
+    return candidato
+
+
+def write_detalle_por_propiedad(wb, fmt, df: pd.DataFrame):
+    """Una hoja por cada propiedad que aparece con Registro='renta'.
+    Dentro de cada hoja: historial completo de esa propiedad (todos los
+    Registro en los que participa: renta, luz, predial, agua, impuestos...)
+    agrupado por Registro › Año › Mes, con subtotal por Registro y gran total.
+    """
+    _, ing_col, egr_col, conc_col, reg_col, _, inm_col, _, _ = detect_columns(df)
+
+    if not inm_col:
+        print("  AVISO: no se encontró columna Inmueble/Propiedad; "
+              "se omite Detalle por Propiedad.")
+        return
+
+    rentas = filter_by_registro(df, reg_col, "renta")
+    propiedades = sorted(
+        p for p in rentas[inm_col].astype(str).str.strip().unique()
+        if p and p.lower() != "nan"
+    )
+    if not propiedades:
+        print("  AVISO: no hay propiedades con Registro='renta'; "
+              "se omite Detalle por Propiedad.")
+        return
+
+    data = df.copy()
+    data["_reg"] = (data[reg_col].astype(str).str.strip()
+                    if reg_col else pd.Series("Sin registro", index=data.index))
+    data["_inm"] = data[inm_col].astype(str).str.strip()
+    data["_ing_n"] = clean_numeric(data[ing_col]).fillna(0) if ing_col else 0
+    data["_egr_n"] = clean_numeric(data[egr_col]).fillna(0) if egr_col else 0
+
+    HDR = ["Año", "Mes", "Ingreso", "Egreso", "Concepto"]
+    usados = set(_HOJAS_FIJAS)
+
+    for propiedad in propiedades:
+        prop_data = data[data["_inm"] == propiedad].sort_values(
+            ["_reg", "_año", "_mes"], na_position="last")
+
+        ws = wb.add_worksheet(_nombre_hoja_valido(propiedad, usados))
+        ws.hide_gridlines(2)
+        ws.set_tab_color(GREEN_MED)
+        ws.set_zoom(90)
+
+        ws.set_column(0, 0,  2)   # indent
+        ws.set_column(1, 1, 10)   # Año
+        ws.set_column(2, 2, 10)   # Mes
+        ws.set_column(3, 3, 14)   # Ingreso
+        ws.set_column(4, 4, 14)   # Egreso
+        ws.set_column(5, 5, 44)   # Concepto
+
+        r = 1
+        ws.set_row(r, 40)
+        ws.merge_range(r, 1, r, 5, propiedad.upper(), fmt["title"])
+        r += 1
+        ws.set_row(r, 16)
+        ws.merge_range(r, 1, r, 5,
+            f"Historial de movimientos  |  Generado: {datetime.now().strftime('%d/%m/%Y')}",
+            fmt["subtitle"])
+        r += 2
+
+        registros = sorted(prop_data["_reg"].unique())
+        total_ing = 0.0
+        total_egr = 0.0
+
+        for reg in registros:
+            df_reg = prop_data[prop_data["_reg"] == reg]
+
+            ws.set_row(r, 20)
+            ws.merge_range(r, 1, r, 5, reg, fmt["section"])
+            r += 1
+
+            for ci, h in enumerate(HDR, start=1):
+                ws.write(r, ci, h, fmt["header"])
+            r += 1
+
+            reg_ing = 0.0
+            reg_egr = 0.0
+
+            for alt, (_, row) in enumerate(df_reg.iterrows()):
+                f  = fmt["cell_alt"]  if alt % 2 else fmt["cell"]
+                fm = fmt["money_alt"] if alt % 2 else fmt["money"]
+
+                año_v  = str(int(row["_año"])) if pd.notna(row.get("_año")) else ""
+                m_idx  = row.get("_mes")
+                mes_v  = MESES[int(m_idx)-1] if pd.notna(m_idx) and 1 <= int(m_idx) <= 12 else ""
+                ing_v  = float(row["_ing_n"]) if row["_ing_n"] else None
+                egr_v  = float(row["_egr_n"]) if row["_egr_n"] else None
+                conc_v = str(row[conc_col] or "") if conc_col and pd.notna(row.get(conc_col)) else ""
+
+                ws.write(r, 1, año_v,                             f)
+                ws.write(r, 2, mes_v,                             f)
+                ws.write(r, 3, ing_v if ing_v is not None else "", fm)
+                ws.write(r, 4, egr_v if egr_v is not None else "", fm)
+                ws.write(r, 5, conc_v,                             f)
+
+                reg_ing += row["_ing_n"]
+                reg_egr += row["_egr_n"]
+                r += 1
+
+            for ci in range(1, 6):
+                ws.write(r, ci, "", fmt["total_lbl"])
+            ws.write(r, 1, f"SUBTOTAL  {reg}", fmt["total_lbl"])
+            ws.write(r, 3, float(reg_ing) if reg_ing else "", fmt["money_tot"])
+            ws.write(r, 4, float(reg_egr) if reg_egr else "", fmt["money_tot"])
+            total_ing += reg_ing
+            total_egr += reg_egr
+            r += 2  # fila en blanco entre registros
+
+        for ci in range(1, 6):
+            ws.write(r, ci, "", fmt["total_lbl"])
+        ws.write(r, 1, "GRAN TOTAL",     fmt["total_lbl"])
+        ws.write(r, 3, float(total_ing), fmt["money_tot"])
+        ws.write(r, 4, float(total_egr), fmt["money_tot"])
+
+        ws.freeze_panes(4, 0)
+
+    print(f"  Hojas generadas: {len(propiedades)} propiedades "
+          f"(Registro='renta') con su historial completo")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def _verificar_archivo_cerrado():
     """Cancela el proceso si el archivo de salida esta abierto en Excel."""
@@ -1059,6 +1204,9 @@ def main():
 
     print(f"\n[{len(CONTROL_TABS)+5}] Generando Detalle Inmuebles...")
     write_detalle_inmuebles(wb, fmt, df)
+
+    print(f"\n[{len(CONTROL_TABS)+6}] Generando Detalle por Propiedad...")
+    write_detalle_por_propiedad(wb, fmt, df)
 
     wb.close()
 
