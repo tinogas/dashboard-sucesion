@@ -19,7 +19,10 @@ import datetime
 # ──────────────────────────────────────────────
 # Rutas de archivos
 # ──────────────────────────────────────────────
-BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 XLSX_PATH  = os.path.join(BASE_DIR, 'dashboard_sucesion.xlsx')
 JSON_PATH  = os.path.join(BASE_DIR, 'recibos_registro.json')
 PDF_DIR    = os.path.join(BASE_DIR, 'recibos')
@@ -362,22 +365,12 @@ def generar_pdfs_recibo(data, folio_num):
 # ──────────────────────────────────────────────
 # Punto de entrada
 # ──────────────────────────────────────────────
-if __name__ == '__main__':
+def main(reiniciar_numeracion=False):
     os.makedirs(PDF_DIR, exist_ok=True)
 
-    # ═══════════════════════════════════════════
-    # BLOQUE DE PRUEBAS — comentar en producción
-    # ═══════════════════════════════════════════
-    resp = input('¿Borrar el registro JSON para reiniciar numeración? (s/N): ').strip().lower()
-    if resp == 's':
-        if os.path.exists(JSON_PATH):
-            os.remove(JSON_PATH)
-            print('  Registro JSON eliminado. Se reasignara consecutivo desde 1.')
-        else:
-            print('  No existia archivo JSON.')
-    # ═══════════════════════════════════════════
-    # FIN BLOQUE DE PRUEBAS
-    # ═══════════════════════════════════════════
+    if reiniciar_numeracion and os.path.exists(JSON_PATH):
+        os.remove(JSON_PATH)
+        print('Registro JSON eliminado. Se reasignará consecutivo desde 1.')
 
     # Cargar estado previo
     registro          = cargar_registro()
@@ -428,3 +421,7 @@ if __name__ == '__main__':
         print(f'  [{i}/{total}] {nom_orig}')
 
     print(f'\nListo. {total} recibo(s) generado(s) en: {PDF_DIR}')
+
+
+if __name__ == '__main__':
+    main(reiniciar_numeracion='--reset' in sys.argv)

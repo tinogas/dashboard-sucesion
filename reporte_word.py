@@ -307,7 +307,11 @@ def add_image(doc, buf: io.BytesIO, width=Inches(6)):
     last_para = doc.paragraphs[-1]
     last_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-XLSX_DASHBOARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_sucesion.xlsx")
+if getattr(sys, 'frozen', False):
+    _BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+XLSX_DASHBOARD = os.path.join(_BASE_DIR, "dashboard_sucesion.xlsx")
 
 def insertar_hoja_control(doc, sheet_name):
     """Lee la hoja pivot del Excel y la inserta como tabla Word formateada.

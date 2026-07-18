@@ -1010,7 +1010,10 @@ def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame):
 # ── Main ───────────────────────────────────────────────────────────────────────
 def _verificar_archivo_cerrado():
     """Cancela el proceso si el archivo de salida esta abierto en Excel."""
-    directorio = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, 'frozen', False):
+        directorio = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        directorio = os.path.dirname(os.path.abspath(__file__))
     lock_file  = os.path.join(directorio, f'~${OUTPUT_FILE}')
     if os.path.exists(lock_file):
         print("\n" + "!" * 60)
@@ -1062,9 +1065,6 @@ def main():
     print(f"\n{'='*60}")
     print(f"  Archivo generado: {OUTPUT_FILE}")
     print(f"{'='*60}")
-
-    import subprocess
-    subprocess.Popen(["start", "", OUTPUT_FILE], shell=True)
 
 
 if __name__ == "__main__":

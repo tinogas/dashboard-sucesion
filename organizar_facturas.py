@@ -29,11 +29,15 @@ except ImportError:
 # ──────────────────────────────────────────────
 # Rutas
 # ──────────────────────────────────────────────
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-FACTURAS_DIR = os.path.join(BASE_DIR, 'facturas')
-DEST_DIR     = os.path.join(BASE_DIR, 'facturas_organizadas')
-XLSX_ORIGEN  = os.path.join(BASE_DIR, 'dashboard_sucesion.xlsx')
-REPORTE_XLSX = os.path.join(BASE_DIR, 'reporte_facturas.xlsx')
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FACTURAS_DIR   = os.path.join(BASE_DIR, 'facturas')
+DEST_DIR       = os.path.join(BASE_DIR, 'facturas_organizadas')
+DUPLICADOS_DIR = os.path.join(FACTURAS_DIR, 'duplicados')
+XLSX_ORIGEN    = os.path.join(BASE_DIR, 'dashboard_sucesion.xlsx')
+REPORTE_XLSX   = os.path.join(BASE_DIR, 'reporte_facturas.xlsx')
 
 # Namespaces CFDI
 NS = {
@@ -406,15 +410,42 @@ def carpeta_destino(cfdi):
     return os.path.join(DEST_DIR, cfdi.get('anio', 'sin_año'), mes_str, emisor)
 
 
+def mover_evitando_sobrescritura(src, dest):
+    """
+    Mueve src a dest. Si dest ya existe (misma factura reprocesada), src se
+    desvía a facturas/duplicados/ en vez de sobrescribir lo que ya está
+    organizado. Si el nombre también choca dentro de duplicados, se agrega
+    un sufijo numérico para no perder ningún archivo.
+    Devuelve (ruta_final, es_duplicado).
+    """
+    if os.path.exists(dest):
+        os.makedirs(DUPLICADOS_DIR, exist_ok=True)
+        nombre = os.path.basename(src)
+        base, ext = os.path.splitext(nombre)
+        destino_dup = os.path.join(DUPLICADOS_DIR, nombre)
+        contador = 1
+        while os.path.exists(destino_dup):
+            destino_dup = os.path.join(DUPLICADOS_DIR, f'{base}_dup{contador}{ext}')
+            contador += 1
+        shutil.move(src, destino_dup)
+        return destino_dup, True
+
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    shutil.move(src, dest)
+    return dest, False
+
+
 def mover_par(xml_path, carpeta, base_uuid):
     """
     Mueve el XML y su PDF correspondiente a carpeta.
-    Devuelve (xml_dest, pdf_dest) o None si no existe.
+    Si alguno ya existe en destino, se desvía a facturas/duplicados/ en vez
+    de sobrescribirlo (ver mover_evitando_sobrescritura).
+    Devuelve (xml_dest, pdf_dest, xml_duplicado, pdf_duplicado).
     """
     os.makedirs(carpeta, exist_ok=True)
 
-    xml_dest = os.path.join(carpeta, os.path.basename(xml_path))
     pdf_dest = None
+    pdf_dup  = False
 
     # Buscar PDF con mismo UUID (nombre base)
     facturas_dir = os.path.dirname(xml_path)
@@ -430,17 +461,18 @@ def mover_par(xml_path, carpeta, base_uuid):
         elif base_uuid.lower() in base.lower():
             candidatos_pdf.append(nombre)
 
-    # Mover XML
-    shutil.move(xml_path, xml_dest)
+    # Mover XML (a duplicados si ya existe en destino)
+    xml_dest_normal = os.path.join(carpeta, os.path.basename(xml_path))
+    xml_dest, xml_dup = mover_evitando_sobrescritura(xml_path, xml_dest_normal)
 
-    # Mover PDF si encontró par
+    # Mover PDF si encontró par (a duplicados si ya existe en destino)
     if candidatos_pdf:
         src_pdf = os.path.join(facturas_dir, candidatos_pdf[0])
-        pdf_dest = os.path.join(carpeta, candidatos_pdf[0])
         if os.path.exists(src_pdf):
-            shutil.move(src_pdf, pdf_dest)
+            pdf_dest_normal = os.path.join(carpeta, candidatos_pdf[0])
+            pdf_dest, pdf_dup = mover_evitando_sobrescritura(src_pdf, pdf_dest_normal)
 
-    return xml_dest, pdf_dest
+    return xml_dest, pdf_dest, xml_dup, pdf_dup
 
 
 # ──────────────────────────────────────────────
@@ -589,8 +621,8 @@ def main():
     # ── Recopilar todos los XMLs (raíz + subdirectorios) ──────────
     xmls_paths = []
     for raiz, dirs, archivos in os.walk(FACTURAS_DIR):
-        # No re-procesar carpetas ya organizadas
-        if DEST_DIR in raiz:
+        # No re-procesar carpetas ya organizadas ni los duplicados ya apartados
+        if DEST_DIR in raiz or DUPLICADOS_DIR in raiz:
             continue
         for f in sorted(archivos):
             if f.lower().endswith('.xml'):
@@ -601,6 +633,7 @@ def main():
     filas_reporte = []
     errores       = []
     ya_movidos    = set()   # rutas completas de PDFs ya movidos
+    duplicados    = []      # nombres de archivos desviados a facturas/duplicados/
 
     # ── Fase 1: procesar XMLs ──────────────────────────────────────
     total = len(xmls_paths)
@@ -624,14 +657,17 @@ def main():
         cfdi['inmueble'] = inmueble
         cfdi['_score']   = score
 
-        carpeta     = carpeta_destino(cfdi)
-        carpeta_rel = os.path.relpath(carpeta, BASE_DIR)
+        carpeta = carpeta_destino(cfdi)
 
-        xml_dest, pdf_dest = mover_par(xml_path, carpeta, base_uuid)
+        xml_dest, pdf_dest, xml_dup, pdf_dup = mover_par(xml_path, carpeta, base_uuid)
         if pdf_dest:
             ya_movidos.add(pdf_dest)
+        if xml_dup:
+            duplicados.append(os.path.basename(xml_dest))
+        if pdf_dup:
+            duplicados.append(os.path.basename(pdf_dest))
 
-        cfdi['carpeta_rel'] = carpeta_rel
+        cfdi['carpeta_rel'] = os.path.relpath(os.path.dirname(xml_dest), BASE_DIR)
         cfdi['pdf_nombre']  = os.path.basename(pdf_dest) if pdf_dest else ''
         filas_reporte.append(cfdi)
 
@@ -640,7 +676,7 @@ def main():
     # ── Fase 2: PDFs sin XML (todos los subdirectorios de facturas) ─
     pdfs_sin_xml = []
     for raiz, dirs, archivos in os.walk(FACTURAS_DIR):
-        if DEST_DIR in raiz:
+        if DEST_DIR in raiz or DUPLICADOS_DIR in raiz:
             continue
         for f in sorted(archivos):
             if not f.lower().endswith('.pdf'):
@@ -661,8 +697,10 @@ def main():
             if cfdi is None:
                 # No se pudo extraer nada: carpeta genérica
                 carpeta = os.path.join(DEST_DIR, 'sin_datos')
-                os.makedirs(carpeta, exist_ok=True)
-                shutil.move(pdf_path, os.path.join(carpeta, nombre))
+                dest_normal = os.path.join(carpeta, nombre)
+                dest, es_dup = mover_evitando_sobrescritura(pdf_path, dest_normal)
+                if es_dup:
+                    duplicados.append(os.path.basename(dest))
                 continue
 
             inmueble, score = buscar_inmueble(cfdi, movimientos)
@@ -670,14 +708,13 @@ def main():
             cfdi['_score']   = score
 
             carpeta     = carpeta_destino(cfdi)
-            carpeta_rel = os.path.relpath(carpeta, BASE_DIR)
-            os.makedirs(carpeta, exist_ok=True)
+            dest_normal = os.path.join(carpeta, nombre)
+            dest, es_dup = mover_evitando_sobrescritura(pdf_path, dest_normal)
+            if es_dup:
+                duplicados.append(os.path.basename(dest))
 
-            dest = os.path.join(carpeta, nombre)
-            shutil.move(pdf_path, dest)
-
-            cfdi['carpeta_rel'] = carpeta_rel
-            cfdi['pdf_nombre']  = nombre
+            cfdi['carpeta_rel'] = os.path.relpath(os.path.dirname(dest), BASE_DIR)
+            cfdi['pdf_nombre']  = os.path.basename(dest)
             filas_reporte.append(cfdi)
 
         print()
@@ -696,6 +733,11 @@ def main():
     print(f'  Sin coincid.:   {match0}')
     if errores:
         print(f'  XMLs con error: {len(errores)} — {errores}')
+
+    if duplicados:
+        print(f'\nDuplicados (ya existían en destino): {len(duplicados)} — movidos a {DUPLICADOS_DIR}')
+        for d in duplicados:
+            print(f'    - {d}')
 
     print(f'\nFacturas organizadas en: {DEST_DIR}')
     print('=' * 60)

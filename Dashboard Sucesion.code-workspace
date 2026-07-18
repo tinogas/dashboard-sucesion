@@ -1,0 +1,29 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "vacaciones-suplencias",
+			"path": "../vacaciones-suplencias"
+		},
+		{
+			"path": "../../xampp/htdocs/inventario"
+		},
+		{
+			"path": "../NSDP"
+		},
+		{
+			"name": "aviso-vencimientos-licencias",
+			"path": "../Visor Alertas/aviso-vencimientos-licencias"
+		},
+		{
+			"name": "reuniones-zoom",
+			"path": "../reuniones-zoom"
+		},
+		{
+			"path": "../../xampp/htdocs/inventory school"
+		}
+	],
+	"settings": {}
+}
