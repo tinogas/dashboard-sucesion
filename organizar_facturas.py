@@ -126,6 +126,16 @@ def leer_cfdi(xml_path):
     concepto_elem = root.find('.//cfdi:Concepto', NS)
     descripcion   = concepto_elem.get('Descripcion', '') if concepto_elem is not None else ''
 
+    # Todos los conceptos (desglose de productos/servicios de la factura)
+    conceptos = []
+    for c in root.findall('.//cfdi:Concepto', NS):
+        desc = (c.get('Descripcion') or '').strip()
+        if desc:
+            conceptos.append({
+                'descripcion': desc,
+                'importe':     float(c.get('Importe', 0) or 0),
+            })
+
     # Para tipo P (pago): el monto real está en pago20:Pago.Monto
     fecha_pago, monto_pago = '', 0.0
     if tipo == 'P':
@@ -159,6 +169,7 @@ def leer_cfdi(xml_path):
         'total':         total,
         'moneda':        moneda,
         'descripcion':   descripcion,
+        'conceptos':     conceptos,
         'anio':          anio,
         'xml_path':      xml_path,
     }
