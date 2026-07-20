@@ -171,6 +171,7 @@ def generate_report(df: pd.DataFrame, output: str):
     data["_ing_n"] = dash.clean_numeric(data[ing_col]).fillna(0) if ing_col else 0
     data["_egr_n"] = dash.clean_numeric(data[egr_col]).fillna(0) if egr_col else 0
     data["_fecha"] = dash.parse_dates(data[fecha_col]) if fecha_col else pd.NaT
+    data = dash._expandir_inmuebles_combinados(data)
 
     rentas = dash.filter_by_registro(data, reg_col, "renta")
     propiedades = sorted(

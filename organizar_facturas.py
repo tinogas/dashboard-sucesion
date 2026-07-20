@@ -47,7 +47,7 @@ NS = {
     'tfd':    'http://www.sat.gob.mx/TimbreFiscalDigital',
 }
 
-TOLERANCIA_DIAS   = 5     # ventana de búsqueda en Movimientos
+TOLERANCIA_DIAS   = 10    # ventana de búsqueda en Movimientos (el pago suele registrarse varios días después de la fecha del CFDI)
 TOLERANCIA_MONTO  = 0.02  # 2% de diferencia permitida en importe
 
 # ──────────────────────────────────────────────

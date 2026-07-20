@@ -77,6 +77,77 @@ FACTURAS_MANUALES = [
         ],
     },
 
+    # ── SERVICLEAN / Marco Antonio Reyes Diaz — factura de octubre 2025
+    # ($7,076.00) pagada en 4 abonos repartidos entre 3 casas distintas.
+    # El emparejamiento normal busca UN movimiento cuyo monto sea ~igual al
+    # total de la factura, pero aqui cada "Abono" en Movimientos es solo una
+    # fraccion del total, asi que se agrega una entrada manual por abono con
+    # su propia fecha/monto y su parte proporcional del concepto e IVA
+    # (aunque la factura SI tiene XML — vease
+    # facturas_organizadas/2025/10_Octubre/MARCO ANTONIO REYES DIAZ/).
+    {
+        'uuid':       'D5436727-E4D1-4530-80D5-2648317C445A',
+        'emisor':     'Marco Antonio Reyes Diaz (Serviclean) - Abono 2, Toledo 2101-A',
+        'fecha':      '2025-10-22',
+        'total':      600.00,
+        'iva':        82.76,
+        'descuento':  0,
+        'conceptos': [
+            {'descripcion': 'Servicio de limpieza en general (prorrateado, $600.00 de $7,076.00)', 'importe': 517.24},
+        ],
+    },
+    {
+        'uuid':       'D5436727-E4D1-4530-80D5-2648317C445A',
+        'emisor':     'Marco Antonio Reyes Diaz (Serviclean) - Abono 1, Toledo 2103',
+        'fecha':      '2025-10-22',
+        'total':      500.00,
+        'iva':        68.97,
+        'descuento':  0,
+        'conceptos': [
+            {'descripcion': 'Servicio de limpieza en general (prorrateado, $500.00 de $7,076.00)', 'importe': 431.03},
+        ],
+    },
+    {
+        'uuid':       'D5436727-E4D1-4530-80D5-2648317C445A',
+        'emisor':     'Marco Antonio Reyes Diaz (Serviclean) - Abono 3, Toledo 2103',
+        'fecha':      '2025-10-23',
+        'total':      4000.00,
+        'iva':        551.72,
+        'descuento':  0,
+        'conceptos': [
+            {'descripcion': 'Servicio de limpieza en general (prorrateado, $4,000.00 de $7,076.00)', 'importe': 3448.28},
+        ],
+    },
+    {
+        'uuid':       'D5436727-E4D1-4530-80D5-2648317C445A',
+        'emisor':     'Marco Antonio Reyes Diaz (Serviclean) - Abono 4, Toledo 2103-B',
+        'fecha':      '2025-10-28',
+        'total':      1976.00,
+        'iva':        272.55,
+        'descuento':  0,
+        'conceptos': [
+            {'descripcion': 'Servicio de limpieza en general (prorrateado, $1,976.00 de $7,076.00)', 'importe': 1703.45},
+        ],
+    },
+
+    # ── SERVICLEAN / Marco Antonio Reyes Diaz — factura de enero 2026
+    # ($2,900.00). El movimiento junta 2 casas en un solo renglon ("Pesqueira
+    # Altos y Toledo 2101-B", ver INMUEBLES_COMBINADOS en dashboard.py), que
+    # se reparte 50/50. Aqui va la mitad del concepto e IVA para que cada
+    # casa (ya dividida por _expandir_inmuebles_combinados) encuentre su
+    # propia parte proporcional.
+    {
+        'uuid':       'BF10E45D-03A5-4463-93BC-092D720FBA16',
+        'emisor':     'Marco Antonio Reyes Diaz (Serviclean) - mitad (50%)',
+        'fecha':      '2026-01-14',
+        'total':      1450.00,
+        'iva':        200.00,
+        'descuento':  0,
+        'conceptos': [
+            {'descripcion': 'Servicio de limpieza en general (prorrateado 50%, mitad de $2,900.00)', 'importe': 1250.00},
+        ],
+    },
+
     # ── MADERAS Y TABLEROS DE NAVOJOA (emisor: Humberta Estrada Duarte) ───
     {
         'uuid':       '7A5BEF8F-49DF-4699-B45E-9FED672060EE',

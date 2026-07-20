@@ -938,6 +938,7 @@ def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame, facturas_idx):
     data["_ing_n"] = clean_numeric(data[ing_col]).fillna(0) if ing_col else 0
     data["_egr_n"] = clean_numeric(data[egr_col]).fillna(0) if egr_col else 0
     data["_fecha"] = parse_dates(data[fecha_col]) if fecha_col else pd.NaT
+    data = _expandir_inmuebles_combinados(data)
 
     data = data.sort_values(["_reg", "_inm", "_año", "_mes"], na_position="last")
 
@@ -1067,6 +1068,36 @@ def _nombre_hoja_valido(nombre: str, usados: set) -> str:
 
     usados.add(candidato.lower())
     return candidato
+
+
+# Movimientos donde el campo Inmueble junta varias casas en un solo renglón
+# (ej. "Casa A y Casa B"). Se reparte Ingreso/Egreso en partes iguales entre
+# las casas listadas, para que cada una aparezca por separado en los reportes
+# por propiedad con su parte proporcional del gasto/factura.
+INMUEBLES_COMBINADOS = {
+    'Pesqueira Altos y Toledo 2101-B': ['Taller Pesqueira Altos', 'Toledo 2101-B'],
+}
+
+
+def _expandir_inmuebles_combinados(data):
+    """Reemplaza cada fila cuyo '_inm' esté en INMUEBLES_COMBINADOS por una
+    fila por cada casa listada, con '_ing_n'/'_egr_n' divididos entre ellas.
+    Las demás filas quedan igual. Debe llamarse después de calcular '_inm',
+    '_ing_n' y '_egr_n'."""
+    partes = []
+    for _, row in data.iterrows():
+        casas = INMUEBLES_COMBINADOS.get(row['_inm'])
+        if not casas:
+            partes.append(row)
+            continue
+        n = len(casas)
+        for casa in casas:
+            nueva = row.copy()
+            nueva['_inm'] = casa
+            nueva['_ing_n'] = row['_ing_n'] / n
+            nueva['_egr_n'] = row['_egr_n'] / n
+            partes.append(nueva)
+    return pd.DataFrame(partes).reset_index(drop=True)
 
 
 def _indexar_facturas_xml():
