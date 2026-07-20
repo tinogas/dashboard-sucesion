@@ -38,6 +38,7 @@ DEST_DIR       = os.path.join(BASE_DIR, 'facturas_organizadas')
 DUPLICADOS_DIR = os.path.join(FACTURAS_DIR, 'duplicados')
 XLSX_ORIGEN    = os.path.join(BASE_DIR, 'dashboard_sucesion.xlsx')
 REPORTE_XLSX   = os.path.join(BASE_DIR, 'reporte_facturas.xlsx')
+SIN_XML_XLSX   = os.path.join(BASE_DIR, 'facturas_sin_xml.xlsx')
 
 # Namespaces CFDI
 NS = {
@@ -108,6 +109,7 @@ def leer_cfdi(xml_path):
     folio = root.get('Folio', '')
     total = float(root.get('Total', 0) or 0)
     subtotal = float(root.get('SubTotal', 0) or 0)
+    descuento = float(root.get('Descuento', 0) or 0)
     moneda   = root.get('Moneda', 'MXN')
 
     emisor   = root.find('cfdi:Emisor', NS)
@@ -145,11 +147,17 @@ def leer_cfdi(xml_path):
             fecha_pago = pago.get('FechaPago', '')[:10]
         total = monto_pago   # usar el monto real del complemento de pago
 
-    # IVA trasladado total
+    # IVA trasladado total: solo el resumen a nivel Comprobante
+    # (cfdi:Impuestos hijo directo de la raíz). Cada Concepto también trae
+    # su propio Traslado anidado que ya está incluido en ese resumen — usar
+    # './/cfdi:Traslado' contaría el IVA doble (una vez por Concepto y otra
+    # en el resumen).
     iva = 0.0
-    for tras in root.findall('.//cfdi:Traslado', NS):
-        if tras.get('Impuesto') == '002':
-            iva += float(tras.get('Importe', 0) or 0)
+    impuestos_cbte = root.find('cfdi:Impuestos', NS)
+    if impuestos_cbte is not None:
+        for tras in impuestos_cbte.findall('cfdi:Traslados/cfdi:Traslado', NS):
+            if tras.get('Impuesto') == '002':
+                iva += float(tras.get('Importe', 0) or 0)
 
     anio = fecha[:4] if fecha else 'sin_año'
 
@@ -166,6 +174,7 @@ def leer_cfdi(xml_path):
         'nom_receptor':  nom_receptor,
         'subtotal':      subtotal,
         'iva':           round(iva, 2),
+        'descuento':     descuento,
         'total':         total,
         'moneda':        moneda,
         'descripcion':   descripcion,
@@ -610,6 +619,109 @@ def generar_xlsx(filas):
 
     wb.save(REPORTE_XLSX)
     print(f'Reporte XLSX: {REPORTE_XLSX}')
+
+
+# ──────────────────────────────────────────────
+# Revisión de facturas organizadas sin XML
+# ──────────────────────────────────────────────
+COLS_SIN_XML = [
+    ('Año',         8),
+    ('Mes',         16),
+    ('Emisor',      36),
+    ('Archivo PDF', 50),
+    ('Carpeta',     60),
+]
+
+
+def _generar_xlsx_sin_xml(filas):
+    hdr_font  = Font(bold=True, color='FFFFFF', size=10)
+    hdr_fill  = PatternFill('solid', fgColor=COLOR_HDR)
+    hdr_align = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    thin      = Side(style='thin', color='CCCCCC')
+    border    = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = 'Sin XML'
+
+    ws.row_dimensions[1].height = 24
+    for ci, (nombre, ancho) in enumerate(COLS_SIN_XML, 1):
+        c = ws.cell(1, ci, nombre)
+        c.font      = hdr_font
+        c.fill      = hdr_fill
+        c.alignment = hdr_align
+        c.border    = border
+        ws.column_dimensions[get_column_letter(ci)].width = ancho
+
+    if not filas:
+        ws.merge_cells(start_row=2, start_column=1, end_row=2,
+                        end_column=len(COLS_SIN_XML))
+        c = ws.cell(2, 1, 'Todas las facturas organizadas tienen su XML correspondiente.')
+        c.font      = Font(bold=True, color='1E5631')
+        c.fill      = PatternFill('solid', fgColor=COLOR_MATCH2)
+        c.alignment = Alignment(horizontal='center', vertical='center')
+    else:
+        for ri, fila in enumerate(filas, 2):
+            fill = PatternFill('solid', fgColor=COLOR_MATCH0)
+            valores = [fila['anio'], fila['mes'], fila['emisor'],
+                       fila['pdf'], fila['carpeta_rel']]
+            for ci, val in enumerate(valores, 1):
+                c = ws.cell(ri, ci, val)
+                c.fill      = fill
+                c.border    = border
+                c.alignment = Alignment(vertical='center', wrap_text=False)
+
+    ws.freeze_panes = 'A2'
+    ws.auto_filter.ref = f'A1:{get_column_letter(len(COLS_SIN_XML))}1'
+
+    wb.save(SIN_XML_XLSX)
+    print(f'Reporte XLSX: {SIN_XML_XLSX}')
+
+
+def revisar_sin_xml():
+    """
+    Recorre facturas_organizadas/ y detecta los PDF que no tienen su XML
+    correspondiente en la misma carpeta (solo comprobante en PDF, sin el
+    CFDI real). Genera facturas_sin_xml.xlsx.
+    """
+    print('=' * 60)
+    print('  Revisión de Facturas sin XML')
+    print('=' * 60)
+
+    if not os.path.isdir(DEST_DIR):
+        print(f'ERROR: no existe la carpeta {DEST_DIR}')
+        return []
+
+    filas = []
+    for raiz, _, archivos in os.walk(DEST_DIR):
+        if DUPLICADOS_DIR in raiz:
+            continue
+        pdfs = sorted(f for f in archivos if f.lower().endswith('.pdf'))
+        if not pdfs:
+            continue
+        xmls_base = [os.path.splitext(f)[0].lower()
+                     for f in archivos if f.lower().endswith('.xml')]
+
+        for pdf in pdfs:
+            base_pdf = os.path.splitext(pdf)[0].lower()
+            tiene_xml = any(base_pdf == xb or xb in base_pdf for xb in xmls_base)
+            if tiene_xml:
+                continue
+
+            rel = os.path.relpath(raiz, BASE_DIR)
+            partes = rel.split(os.sep)
+            filas.append({
+                'anio':        partes[1] if len(partes) > 1 else '',
+                'mes':         partes[2] if len(partes) > 2 else '',
+                'emisor':      partes[3] if len(partes) > 3 else '',
+                'pdf':         pdf,
+                'carpeta_rel': rel,
+            })
+
+    print(f'  PDFs revisados sin su XML: {len(filas)}')
+    _generar_xlsx_sin_xml(filas)
+    print('=' * 60)
+    return filas
 
 
 # ──────────────────────────────────────────────

@@ -21,8 +21,11 @@ build/
 # Datos sensibles / archivos generados
 recibos/
 Facturas/
+facturas/
 facturas_organizadas/
+revision/
 recibos_registro.json
+gmail_facturas_registro.json
 
 # Documentos generados
 *.pdf
