@@ -3,10 +3,12 @@
 Panel de control (GUI) para el pipeline de Dashboard Sucesión.
 
 Ejecuta en el orden correcto los pasos definidos en PROCESO.md:
-  1. dashboard.py         (siempre primero — genera dashboard_sucesion.xlsx)
-  2. organizar_facturas.py (opcional — solo si hay CFDIs nuevos en facturas/)
-  3. generar_recibos.py    (requiere el Excel del paso 1)
-  4. reporte_word.py       (requiere el Excel del paso 1)
+  1. descargar_facturas_gmail.py (opcional — baja adjuntos nuevos de Gmail a facturas/)
+  2. dashboard.py               (siempre primero — genera dashboard_sucesion.xlsx)
+  3. organizar_facturas.py      (opcional — solo si hay CFDIs nuevos en facturas/)
+  4. generar_recibos.py         (requiere el Excel del paso 2)
+  5. reporte_word.py            (requiere el Excel del paso 2)
+  6. reporte_word_propiedades.py (bitácora por inmueble; solo requiere credentials.json)
 
 Cada paso se ejecuta en un proceso hijo independiente (este mismo script,
 invocado con --run-step) para aislar sus sys.exit()/errores del proceso
@@ -27,20 +29,27 @@ if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-XLSX_PATH     = os.path.join(BASE_DIR, 'dashboard_sucesion.xlsx')
-XLSX_LOCK     = os.path.join(BASE_DIR, '~$dashboard_sucesion.xlsx')
-DOCX_PATH     = os.path.join(BASE_DIR, 'reporte_ejecutivo_sucesion.docx')
-RECIBOS_DIR   = os.path.join(BASE_DIR, 'recibos')
-RECIBOS_JSON  = os.path.join(BASE_DIR, 'recibos_registro.json')
-FACTURAS_DIR  = os.path.join(BASE_DIR, 'facturas')
-FACT_ORG_DIR  = os.path.join(BASE_DIR, 'facturas_organizadas')
-CREDENTIALS   = os.path.join(BASE_DIR, 'credentials.json')
+XLSX_PATH      = os.path.join(BASE_DIR, 'dashboard_sucesion.xlsx')
+XLSX_LOCK      = os.path.join(BASE_DIR, '~$dashboard_sucesion.xlsx')
+DOCX_PATH      = os.path.join(BASE_DIR, 'reporte_ejecutivo_sucesion.docx')
+DOCX_PROP_PATH = os.path.join(BASE_DIR, 'reporte_propiedades.docx')
+RECIBOS_DIR    = os.path.join(BASE_DIR, 'recibos')
+RECIBOS_JSON   = os.path.join(BASE_DIR, 'recibos_registro.json')
+FACTURAS_DIR   = os.path.join(BASE_DIR, 'facturas')
+FACT_ORG_DIR   = os.path.join(BASE_DIR, 'facturas_organizadas')
+SIN_XML_XLSX   = os.path.join(BASE_DIR, 'facturas_sin_xml.xlsx')
+GMAIL_REPORTE_XLSX = os.path.join(BASE_DIR, 'gmail_facturas_reporte.xlsx')
+CLIENT_SECRET  = os.path.join(BASE_DIR, 'client_secret.json')
+CREDENTIALS    = os.path.join(BASE_DIR, 'credentials.json')
 
 STEPS = [
-    {'key': 'dashboard', 'label': 'Actualizar Dashboard (Excel)',   'default': True},
-    {'key': 'facturas',  'label': 'Organizar Facturas CFDI',        'default': False},
-    {'key': 'recibos',   'label': 'Generar Recibos de Renta',       'default': True},
-    {'key': 'reporte',   'label': 'Reporte Ejecutivo (Word)',       'default': False},
+    {'key': 'facturas_gmail', 'label': 'Descargar Facturas de Gmail',   'default': False},
+    {'key': 'dashboard',      'label': 'Actualizar Dashboard (Excel)',   'default': True},
+    {'key': 'facturas',       'label': 'Organizar Facturas CFDI',        'default': False},
+    {'key': 'facturas_sin_xml', 'label': 'Revisar Facturas sin XML',     'default': False},
+    {'key': 'recibos',        'label': 'Generar Recibos de Renta',       'default': True},
+    {'key': 'reporte',        'label': 'Reporte Ejecutivo (Word)',       'default': False},
+    {'key': 'reporte_propiedades', 'label': 'Reporte de Bitácora por Inmueble (Word)', 'default': False},
 ]
 
 
@@ -48,18 +57,27 @@ STEPS = [
 # Ejecución de un paso (corre dentro del proceso hijo)
 # ─────────────────────────────────────────────────────────────
 def run_step(key, reset_recibos=False):
-    if key == 'dashboard':
+    if key == 'facturas_gmail':
+        import descargar_facturas_gmail
+        descargar_facturas_gmail.main()
+    elif key == 'dashboard':
         import dashboard
         dashboard.main()
     elif key == 'facturas':
         import organizar_facturas
         organizar_facturas.main()
+    elif key == 'facturas_sin_xml':
+        import organizar_facturas
+        organizar_facturas.revisar_sin_xml()
     elif key == 'recibos':
         import generar_recibos
         generar_recibos.main(reiniciar_numeracion=reset_recibos)
     elif key == 'reporte':
         import reporte_word
         reporte_word.main()
+    elif key == 'reporte_propiedades':
+        import reporte_word_propiedades
+        reporte_word_propiedades.main()
     else:
         raise ValueError(f'Paso desconocido: {key}')
 
@@ -97,8 +115,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('Dashboard Sucesión — Panel de Control')
-        self.geometry('760x620')
-        self.minsize(680, 520)
+        self.geometry('960x760')
+        self.minsize(920, 700)
 
         self.msg_queue = queue.Queue()
         self.running = False
@@ -169,11 +187,18 @@ class App(tk.Tk):
                                      command=lambda: self._abrir(XLSX_PATH))
         self.btn_word = ttk.Button(outputs_frame, text='Word (reporte)',
                                     command=lambda: self._abrir(DOCX_PATH))
+        self.btn_word_prop = ttk.Button(outputs_frame, text='Word (bitácora inmuebles)',
+                                         command=lambda: self._abrir(DOCX_PROP_PATH))
         self.btn_recibos = ttk.Button(outputs_frame, text='Carpeta de recibos',
                                        command=lambda: self._abrir(RECIBOS_DIR))
         self.btn_facturas = ttk.Button(outputs_frame, text='Facturas organizadas',
                                         command=lambda: self._abrir(FACT_ORG_DIR))
-        for b in (self.btn_excel, self.btn_word, self.btn_recibos, self.btn_facturas):
+        self.btn_sin_xml = ttk.Button(outputs_frame, text='Facturas sin XML',
+                                       command=lambda: self._abrir(SIN_XML_XLSX))
+        self.btn_gmail = ttk.Button(outputs_frame, text='Reporte descarga Gmail',
+                                     command=lambda: self._abrir(GMAIL_REPORTE_XLSX))
+        for b in (self.btn_excel, self.btn_word, self.btn_word_prop, self.btn_recibos,
+                  self.btn_facturas, self.btn_sin_xml, self.btn_gmail):
             b.pack(side='left', padx=6, pady=6)
 
     def _abrir(self, path):
@@ -185,14 +210,24 @@ class App(tk.Tk):
     def _refresh_output_buttons(self):
         self.btn_excel.state(['!disabled'] if os.path.exists(XLSX_PATH) else ['disabled'])
         self.btn_word.state(['!disabled'] if os.path.exists(DOCX_PATH) else ['disabled'])
+        self.btn_word_prop.state(['!disabled'] if os.path.exists(DOCX_PROP_PATH) else ['disabled'])
         self.btn_recibos.state(['!disabled'] if os.path.isdir(RECIBOS_DIR) else ['disabled'])
         self.btn_facturas.state(['!disabled'] if os.path.isdir(FACT_ORG_DIR) else ['disabled'])
+        self.btn_sin_xml.state(['!disabled'] if os.path.exists(SIN_XML_XLSX) else ['disabled'])
+        self.btn_gmail.state(['!disabled'] if os.path.exists(GMAIL_REPORTE_XLSX) else ['disabled'])
 
     # ---------- validaciones previas ----------
     def _validar_prerrequisitos(self, seleccionados):
         errores = []
 
-        necesita_credenciales = 'dashboard' in seleccionados or 'reporte' in seleccionados
+        if 'facturas_gmail' in seleccionados and not os.path.exists(CLIENT_SECRET):
+            errores.append(
+                'Falta client_secret.json (credencial OAuth de escritorio de Google Cloud), '
+                'necesario para "Descargar Facturas de Gmail".'
+            )
+
+        necesita_credenciales = ('dashboard' in seleccionados or 'reporte' in seleccionados
+                                  or 'reporte_propiedades' in seleccionados)
         if necesita_credenciales and not os.path.exists(CREDENTIALS):
             errores.append(
                 'Falta credentials.json (Service Account de Google Cloud), '
@@ -217,6 +252,12 @@ class App(tk.Tk):
                 'No existe la carpeta facturas/. Se omitirá "Organizar Facturas CFDI".'
             )
 
+        if 'facturas_sin_xml' in seleccionados and not os.path.isdir(FACT_ORG_DIR):
+            errores.append(
+                'No existe la carpeta facturas_organizadas/. '
+                'Se omitirá "Revisar Facturas sin XML".'
+            )
+
         return errores
 
     # ---------- lanzar ejecución ----------
@@ -238,6 +279,11 @@ class App(tk.Tk):
         if 'facturas' in seleccionados and not os.path.isdir(FACTURAS_DIR):
             seleccionados.remove('facturas')
             self._log('Se omite "Organizar Facturas CFDI": no existe la carpeta facturas/.\n')
+
+        if 'facturas_sin_xml' in seleccionados and not os.path.isdir(FACT_ORG_DIR):
+            seleccionados.remove('facturas_sin_xml')
+            self._log('Se omite "Revisar Facturas sin XML": no existe la carpeta '
+                       'facturas_organizadas/.\n')
 
         if self.reset_recibos_var.get() and 'recibos' in seleccionados:
             if not messagebox.askyesno(

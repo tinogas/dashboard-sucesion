@@ -28,6 +28,10 @@ except ImportError:
     print("Dependencias faltantes. Ejecuta:  pip install -r requirements.txt")
     sys.exit(1)
 
+# Reutiliza el parser de CFDI y las rutas de facturas de organizar_facturas.py
+import organizar_facturas
+from facturas_manuales import FACTURAS_MANUALES
+
 # ── Configuracion ──────────────────────────────────────────────────────────────
 SPREADSHEET_ID   = "1YTvNIui0kBSMWRs6mMrZvbM690ILMl_W"
 SHEET_NAME_MOV   = "movimientos"
@@ -315,6 +319,8 @@ def add_formats(wb):
                         font_size=9, align="right", bg_color=BLUE_LIGHT),
         "pivot_zero": f(border=1, font_size=9, align="center",
                         font_color="#BBBBBB"),
+        "detalle_item": f(italic=True, font_size=9, font_color="#555555",
+                          bg_color=GRAY_ROW, indent=2, valign="vcenter"),
     }
 
 
@@ -897,11 +903,12 @@ def write_control_tab(wb, fmt, df: pd.DataFrame,
 
 
 # ── Detalle por Registro ───────────────────────────────────────────────────────
-def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame):
+def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame, facturas_idx):
     """Hoja de detalle ordenada por Registro › Inmueble › Año › Mes.
     Sección por cada Registro con subtotal; dentro de cada sección las filas
-    muestran Inmueble, Año, Mes, Ingreso, Egreso, Concepto."""
-    _, ing_col, egr_col, conc_col, reg_col, _, inm_col, _, _ = detect_columns(df)
+    muestran Inmueble, Año, Mes, Ingreso, Egreso, Concepto. En Mantenimiento,
+    cada renglón despliega (acordeón) los productos de su factura XML."""
+    fecha_col, ing_col, egr_col, conc_col, reg_col, _, inm_col, _, _ = detect_columns(df)
 
     MESES_C = ["Ene","Feb","Mar","Abr","May","Jun",
                "Jul","Ago","Sep","Oct","Nov","Dic"]
@@ -910,6 +917,9 @@ def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame):
     ws.hide_gridlines(2)
     ws.set_tab_color("#16A085")
     ws.set_zoom(90)
+    # symbols_below=False: el boton +/- del acordeon queda pegado al
+    # renglon de Mantenimiento (arriba del grupo), no abajo del grupo.
+    ws.outline_settings(True, False, True, False)
 
     ws.set_column(0, 0,  2)   # indent
     ws.set_column(1, 1, 36)   # Inmueble
@@ -927,6 +937,8 @@ def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame):
 
     data["_ing_n"] = clean_numeric(data[ing_col]).fillna(0) if ing_col else 0
     data["_egr_n"] = clean_numeric(data[egr_col]).fillna(0) if egr_col else 0
+    data["_fecha"] = parse_dates(data[fecha_col]) if fecha_col else pd.NaT
+    data = _expandir_inmuebles_combinados(data)
 
     data = data.sort_values(["_reg", "_inm", "_año", "_mes"], na_position="last")
 
@@ -948,6 +960,7 @@ def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame):
 
     for reg in registros:
         df_reg = data[data["_reg"] == reg]
+        es_mantenimiento = reg.strip().lower() == "mantenimiento"
 
         # Encabezado de sección: Registro
         ws.set_row(r, 20)
@@ -985,6 +998,30 @@ def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame):
             reg_egr += row["_egr_n"]
             r += 1
 
+            # ── Acordeón de productos (solo Mantenimiento) ──────────────────
+            if es_mantenimiento and pd.notna(row.get("_fecha")):
+                factura = _buscar_factura(
+                    facturas_idx, row["_fecha"], row.get("_año"),
+                    abs(row["_egr_n"]) or abs(row["_ing_n"]),
+                )
+                for item in (factura["conceptos"] if factura else []):
+                    ws.set_row(r, None, None, {"level": 1, "hidden": True})
+                    importe = item.get("importe") or 0
+                    if importe:
+                        ws.write(r, 5, -abs(importe), fmt["money_alt"])
+                    ws.write(r, 6, f"↳ {item['descripcion']}", fmt["detalle_item"])
+                    r += 1
+                if factura and factura.get("iva"):
+                    ws.set_row(r, None, None, {"level": 1, "hidden": True})
+                    ws.write(r, 5, -abs(factura["iva"]), fmt["money_alt"])
+                    ws.write(r, 6, "↳ IVA", fmt["detalle_item"])
+                    r += 1
+                if factura and factura.get("descuento"):
+                    ws.set_row(r, None, None, {"level": 1, "hidden": True})
+                    ws.write(r, 5, abs(factura["descuento"]), fmt["money_alt"])
+                    ws.write(r, 6, "↳ Descuento", fmt["detalle_item"])
+                    r += 1
+
         # Subtotal del registro
         for ci in range(1, 7):
             ws.write(r, ci, "", fmt["total_lbl"])
@@ -1005,6 +1042,291 @@ def write_detalle_inmuebles(wb, fmt, df: pd.DataFrame):
     ws.freeze_panes(4, 0)
     print(f"  Hoja generada: 'Detalle Registro'  "
           f"({len(data)} registros, {len(registros)} tipos de registro)")
+
+
+# ── Detalle por Propiedad (una hoja por cada inmueble en renta) ────────────────
+_HOJAS_FIJAS = {
+    "movimientos", "dashboard", "_aux", "informe dinámico", "informe contable",
+    "detalle registro",
+} | {tab_name.lower() for tab_name, *_ in CONTROL_TABS}
+
+
+def _nombre_hoja_valido(nombre: str, usados: set) -> str:
+    """Sanitiza nombre para usarlo como nombre de hoja de Excel: quita
+    caracteres invalidos ( : \\ / ? * [ ] ), recorta a 31 caracteres y
+    evita duplicados agregando un sufijo numerico."""
+    limpio = re.sub(r'[:\\/?*\[\]]', ' ', str(nombre)).strip()
+    limpio = re.sub(r'\s+', ' ', limpio) or "Propiedad"
+    base = limpio[:31]
+
+    candidato = base
+    i = 2
+    while candidato.lower() in usados:
+        sufijo = f" ({i})"
+        candidato = base[:31 - len(sufijo)] + sufijo
+        i += 1
+
+    usados.add(candidato.lower())
+    return candidato
+
+
+# Movimientos donde el campo Inmueble junta varias casas en un solo renglón
+# (ej. "Casa A y Casa B"). Se reparte Ingreso/Egreso en partes iguales entre
+# las casas listadas, para que cada una aparezca por separado en los reportes
+# por propiedad con su parte proporcional del gasto/factura.
+INMUEBLES_COMBINADOS = {
+    'Pesqueira Altos y Toledo 2101-B': ['Taller Pesqueira Altos', 'Toledo 2101-B'],
+}
+
+
+def _expandir_inmuebles_combinados(data):
+    """Reemplaza cada fila cuyo '_inm' esté en INMUEBLES_COMBINADOS por una
+    fila por cada casa listada, con '_ing_n'/'_egr_n' divididos entre ellas.
+    Las demás filas quedan igual. Debe llamarse después de calcular '_inm',
+    '_ing_n' y '_egr_n'."""
+    partes = []
+    for _, row in data.iterrows():
+        casas = INMUEBLES_COMBINADOS.get(row['_inm'])
+        if not casas:
+            partes.append(row)
+            continue
+        n = len(casas)
+        for casa in casas:
+            nueva = row.copy()
+            nueva['_inm'] = casa
+            nueva['_ing_n'] = row['_ing_n'] / n
+            nueva['_egr_n'] = row['_egr_n'] / n
+            partes.append(nueva)
+    return pd.DataFrame(partes).reset_index(drop=True)
+
+
+def _indexar_facturas_xml():
+    """Escanea facturas/ y facturas_organizadas/ y parsea cada XML CFDI con
+    organizar_facturas.leer_cfdi(). Agrega también las facturas de
+    facturas_manuales.py (facturas que solo llegaron en PDF, sin XML, y cuyo
+    detalle se transcribió a mano). Devuelve una lista de dicts
+    {fecha (datetime), total, iva, conceptos} lista para buscar coincidencias
+    por importe/fecha. Se construye una sola vez por corrida."""
+    xml_paths = []
+    for base in (organizar_facturas.FACTURAS_DIR, organizar_facturas.DEST_DIR):
+        if not os.path.isdir(base):
+            continue
+        for raiz, _, archivos in os.walk(base):
+            if organizar_facturas.DUPLICADOS_DIR in raiz:
+                continue
+            for f in archivos:
+                if f.lower().endswith('.xml'):
+                    xml_paths.append(os.path.join(raiz, f))
+
+    facturas = []
+    for xml_path in xml_paths:
+        cfdi = organizar_facturas.leer_cfdi(xml_path)
+        if not cfdi or not cfdi.get('conceptos'):
+            continue
+        fecha = organizar_facturas.parse_fecha(cfdi.get('fecha_pago') or cfdi.get('fecha'))
+        if fecha is None:
+            continue
+        facturas.append({
+            'fecha':      fecha,
+            'total':      cfdi.get('total') or 0,
+            'iva':        cfdi.get('iva') or 0,
+            'descuento':  cfdi.get('descuento') or 0,
+            'conceptos':  cfdi['conceptos'],
+            'emisor':     cfdi.get('nom_emisor') or '',
+            'folio':      cfdi.get('folio') or '',
+            'uuid':       cfdi.get('uuid') or '',
+        })
+
+    for fac in FACTURAS_MANUALES:
+        fecha = organizar_facturas.parse_fecha(fac['fecha'])
+        if fecha is None or not fac.get('conceptos'):
+            continue
+        facturas.append({
+            'fecha':      fecha,
+            'total':      fac.get('total') or 0,
+            'iva':        fac.get('iva') or 0,
+            'descuento':  fac.get('descuento') or 0,
+            'conceptos':  fac['conceptos'],
+            'emisor':     fac.get('emisor') or '',
+            'folio':      fac.get('folio') or '',
+            'uuid':       fac.get('uuid') or '',
+        })
+
+    print(f"  Índice de facturas XML: {len(facturas)} de {len(xml_paths)} "
+          f"XMLs con productos detectados + {len(FACTURAS_MANUALES)} manuales "
+          f"(para acordeón de Mantenimiento)")
+    return facturas
+
+
+def _buscar_factura(facturas_idx, fecha_mov, año_mov, monto_mov):
+    """Busca en facturas_idx la factura cuyo Total y Fecha coincidan (con la
+    misma tolerancia que organizar_facturas.buscar_inmueble) con el
+    movimiento dado. Devuelve el dict de la factura (conceptos + iva), o
+    None si no hay match."""
+    if fecha_mov is None or pd.isna(año_mov) or not monto_mov:
+        return None
+
+    mejor, mejor_dist = None, None
+    for fac in facturas_idx:
+        if fac['fecha'].year != int(año_mov):
+            continue
+        if not organizar_facturas.montos_cercanos(monto_mov, fac['total']):
+            continue
+        dist = abs((fac['fecha'] - fecha_mov).days)
+        if dist > organizar_facturas.TOLERANCIA_DIAS:
+            continue
+        if mejor is None or dist < mejor_dist:
+            mejor, mejor_dist = fac, dist
+
+    return mejor
+
+
+def write_detalle_por_propiedad(wb, fmt, df: pd.DataFrame, facturas_idx):
+    """Una hoja por cada propiedad que aparece con Registro='renta'.
+    Dentro de cada hoja: historial completo de esa propiedad (todos los
+    Registro en los que participa: renta, luz, predial, agua, impuestos...)
+    agrupado por Registro › Año › Mes, con subtotal por Registro y gran total.
+    """
+    fecha_col, ing_col, egr_col, conc_col, reg_col, _, inm_col, _, _ = detect_columns(df)
+
+    if not inm_col:
+        print("  AVISO: no se encontró columna Inmueble/Propiedad; "
+              "se omite Detalle por Propiedad.")
+        return
+
+    rentas = filter_by_registro(df, reg_col, "renta")
+    propiedades = sorted(
+        p for p in rentas[inm_col].astype(str).str.strip().unique()
+        if p and p.lower() != "nan"
+    )
+    if not propiedades:
+        print("  AVISO: no hay propiedades con Registro='renta'; "
+              "se omite Detalle por Propiedad.")
+        return
+
+    data = df.copy()
+    data["_reg"] = (data[reg_col].astype(str).str.strip()
+                    if reg_col else pd.Series("Sin registro", index=data.index))
+    data["_inm"] = data[inm_col].astype(str).str.strip()
+    data["_ing_n"] = clean_numeric(data[ing_col]).fillna(0) if ing_col else 0
+    data["_egr_n"] = clean_numeric(data[egr_col]).fillna(0) if egr_col else 0
+    data["_fecha"] = parse_dates(data[fecha_col]) if fecha_col else pd.NaT
+
+    HDR = ["Año", "Mes", "Ingreso", "Egreso", "Concepto"]
+    usados = set(_HOJAS_FIJAS)
+
+    for propiedad in propiedades:
+        prop_data = data[data["_inm"] == propiedad].sort_values(
+            ["_reg", "_año", "_mes"], na_position="last")
+
+        ws = wb.add_worksheet(_nombre_hoja_valido(propiedad, usados))
+        ws.hide_gridlines(2)
+        ws.set_tab_color(GREEN_MED)
+        ws.set_zoom(90)
+        # symbols_below=False: el boton +/- del acordeon queda pegado al
+        # renglon de Mantenimiento (arriba del grupo), no abajo del grupo.
+        ws.outline_settings(True, False, True, False)
+
+        ws.set_column(0, 0,  2)   # indent
+        ws.set_column(1, 1, 10)   # Año
+        ws.set_column(2, 2, 10)   # Mes
+        ws.set_column(3, 3, 14)   # Ingreso
+        ws.set_column(4, 4, 14)   # Egreso
+        ws.set_column(5, 5, 44)   # Concepto
+
+        r = 1
+        ws.set_row(r, 40)
+        ws.merge_range(r, 1, r, 5, propiedad.upper(), fmt["title"])
+        r += 1
+        ws.set_row(r, 16)
+        ws.merge_range(r, 1, r, 5,
+            f"Historial de movimientos  |  Generado: {datetime.now().strftime('%d/%m/%Y')}",
+            fmt["subtitle"])
+        r += 2
+
+        registros = sorted(prop_data["_reg"].unique())
+        total_ing = 0.0
+        total_egr = 0.0
+
+        for reg in registros:
+            df_reg = prop_data[prop_data["_reg"] == reg]
+            es_mantenimiento = reg.strip().lower() == "mantenimiento"
+
+            ws.set_row(r, 20)
+            ws.merge_range(r, 1, r, 5, reg, fmt["section"])
+            r += 1
+
+            for ci, h in enumerate(HDR, start=1):
+                ws.write(r, ci, h, fmt["header"])
+            r += 1
+
+            reg_ing = 0.0
+            reg_egr = 0.0
+
+            for alt, (_, row) in enumerate(df_reg.iterrows()):
+                f  = fmt["cell_alt"]  if alt % 2 else fmt["cell"]
+                fm = fmt["money_alt"] if alt % 2 else fmt["money"]
+
+                año_v  = str(int(row["_año"])) if pd.notna(row.get("_año")) else ""
+                m_idx  = row.get("_mes")
+                mes_v  = MESES[int(m_idx)-1] if pd.notna(m_idx) and 1 <= int(m_idx) <= 12 else ""
+                ing_v  = float(row["_ing_n"]) if row["_ing_n"] else None
+                egr_v  = float(row["_egr_n"]) if row["_egr_n"] else None
+                conc_v = str(row[conc_col] or "") if conc_col and pd.notna(row.get(conc_col)) else ""
+
+                ws.write(r, 1, año_v,                             f)
+                ws.write(r, 2, mes_v,                             f)
+                ws.write(r, 3, ing_v if ing_v is not None else "", fm)
+                ws.write(r, 4, egr_v if egr_v is not None else "", fm)
+                ws.write(r, 5, conc_v,                             f)
+
+                reg_ing += row["_ing_n"]
+                reg_egr += row["_egr_n"]
+                r += 1
+
+                # ── Acordeón de productos (solo Mantenimiento) ──────────────
+                if es_mantenimiento and pd.notna(row.get("_fecha")):
+                    factura = _buscar_factura(
+                        facturas_idx, row["_fecha"], row.get("_año"),
+                        abs(row["_egr_n"]) or abs(row["_ing_n"]),
+                    )
+                    for item in (factura["conceptos"] if factura else []):
+                        ws.set_row(r, None, None, {"level": 1, "hidden": True})
+                        importe = item.get("importe") or 0
+                        if importe:
+                            ws.write(r, 4, -abs(importe), fmt["money_alt"])
+                        ws.write(r, 5, f"↳ {item['descripcion']}", fmt["detalle_item"])
+                        r += 1
+                    if factura and factura.get("iva"):
+                        ws.set_row(r, None, None, {"level": 1, "hidden": True})
+                        ws.write(r, 4, -abs(factura["iva"]), fmt["money_alt"])
+                        ws.write(r, 5, "↳ IVA", fmt["detalle_item"])
+                        r += 1
+                    if factura and factura.get("descuento"):
+                        ws.set_row(r, None, None, {"level": 1, "hidden": True})
+                        ws.write(r, 4, abs(factura["descuento"]), fmt["money_alt"])
+                        ws.write(r, 5, "↳ Descuento", fmt["detalle_item"])
+                        r += 1
+
+            for ci in range(1, 6):
+                ws.write(r, ci, "", fmt["total_lbl"])
+            ws.write(r, 1, f"SUBTOTAL  {reg}", fmt["total_lbl"])
+            ws.write(r, 3, float(reg_ing) if reg_ing else "", fmt["money_tot"])
+            ws.write(r, 4, float(reg_egr) if reg_egr else "", fmt["money_tot"])
+            total_ing += reg_ing
+            total_egr += reg_egr
+            r += 2  # fila en blanco entre registros
+
+        for ci in range(1, 6):
+            ws.write(r, ci, "", fmt["total_lbl"])
+        ws.write(r, 1, "GRAN TOTAL",     fmt["total_lbl"])
+        ws.write(r, 3, float(total_ing), fmt["money_tot"])
+        ws.write(r, 4, float(total_egr), fmt["money_tot"])
+
+        ws.freeze_panes(4, 0)
+
+    print(f"  Hojas generadas: {len(propiedades)} propiedades "
+          f"(Registro='renta') con su historial completo")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -1057,8 +1379,13 @@ def main():
         print(f"\n[{i}] Generando {tab_name} (Registro='{reg_val}', fila='{campo_fila}')...")
         write_control_tab(wb, fmt, df, tab_name, color, reg_val, title, use_ing, campo_fila, res_conc)
 
+    facturas_idx = _indexar_facturas_xml()
+
     print(f"\n[{len(CONTROL_TABS)+5}] Generando Detalle Inmuebles...")
-    write_detalle_inmuebles(wb, fmt, df)
+    write_detalle_inmuebles(wb, fmt, df, facturas_idx)
+
+    print(f"\n[{len(CONTROL_TABS)+6}] Generando Detalle por Propiedad...")
+    write_detalle_por_propiedad(wb, fmt, df, facturas_idx)
 
     wb.close()
 
