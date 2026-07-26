@@ -6,6 +6,8 @@
       "Bash(powershell -Command \"Get-ChildItem -Path 'facturas' -Directory | Select-Object Name\")",
       "Bash(\"./.venv/Scripts/python.exe\" -)",
       "Bash(python3 -c ' *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr merge *)",
       "Bash(cd *)"
     ],
     "additionalDirectories": [
