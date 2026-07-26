@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(Get-Item \"c:\\\\claude proyectos\\\\vacaciones-suplencias\\\\prisma\\\\vacaciones.db\" | Select-Object Name, @{N='KB';E={[math]::Round\\($_.Length/1KB,0\\)}}, LastWriteTime)"
+      "PowerShell(Get-Item \"c:\\\\claude proyectos\\\\vacaciones-suplencias\\\\prisma\\\\vacaciones.db\" | Select-Object Name, @{N='KB';E={[math]::Round\\($_.Length/1KB,0\\)}}, LastWriteTime)",
+      "Bash(powershell -Command \"Get-ChildItem -Path 'facturas' -File | Select-Object Name, Length, Extension | Format-Table -AutoSize\")",
+      "Bash(powershell -Command \"Get-ChildItem -Path 'facturas' -Directory | Select-Object Name\")",
+      "Bash(\"./.venv/Scripts/python.exe\" -)",
+      "Bash(python3 -c ' *)",
+      "Bash(cd *)"
     ],
     "additionalDirectories": [
       "C:\\xampp\\htdocs\\inventario\\api"

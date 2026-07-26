@@ -1070,6 +1070,43 @@ def _nombre_hoja_valido(nombre: str, usados: set) -> str:
     return candidato
 
 
+# Inmuebles que deben tener su propia hoja/sección aunque NO tengan ningún
+# movimiento con Registro='renta' (ej. casa desocupada a la que solo se le
+# registran gastos de mantenimiento, luz o predial). Sin esto, la detección
+# automática — que parte de los inmuebles en renta — los deja fuera y su corte
+# de gastos nunca se genera. Agregar aquí cada inmueble en esa situación; en
+# cuanto empiece a facturar rentas se detecta solo y se puede quitar de la
+# lista sin ningún efecto.
+INMUEBLES_SIN_RENTA = {
+    'Toledo 2101-A',
+}
+
+
+def listar_propiedades(data: pd.DataFrame, reg_col: str, inm_col: str) -> list:
+    """Inmuebles que reciben hoja (Excel) o sección (Word) propia: los que
+    tienen al menos un movimiento con Registro='renta', más los de
+    INMUEBLES_SIN_RENTA que aparezcan en los movimientos. Devuelve la lista
+    ordenada, con los nombres tal como vienen en los datos."""
+    inmuebles = data[inm_col].astype(str).str.strip()
+    presentes = {p.lower(): p for p in inmuebles if p and p.lower() != "nan"}
+
+    rentas = filter_by_registro(data, reg_col, "renta")
+    props = {
+        p for p in rentas[inm_col].astype(str).str.strip()
+        if p and p.lower() != "nan"
+    }
+
+    for extra in INMUEBLES_SIN_RENTA:
+        real = presentes.get(extra.strip().lower())
+        if real:
+            props.add(real)
+        else:
+            print(f"  AVISO: '{extra}' está en INMUEBLES_SIN_RENTA pero no "
+                  f"aparece en la columna de inmueble; se omite.")
+
+    return sorted(props)
+
+
 # Movimientos donde el campo Inmueble junta varias casas en un solo renglón
 # (ej. "Casa A y Casa B"). Se reparte Ingreso/Egreso en partes iguales entre
 # las casas listadas, para que cada una aparezca por separado en los reportes
@@ -1182,7 +1219,8 @@ def _buscar_factura(facturas_idx, fecha_mov, año_mov, monto_mov):
 
 
 def write_detalle_por_propiedad(wb, fmt, df: pd.DataFrame, facturas_idx):
-    """Una hoja por cada propiedad que aparece con Registro='renta'.
+    """Una hoja por cada propiedad que aparece con Registro='renta', más las
+    listadas en INMUEBLES_SIN_RENTA.
     Dentro de cada hoja: historial completo de esa propiedad (todos los
     Registro en los que participa: renta, luz, predial, agua, impuestos...)
     agrupado por Registro › Año › Mes, con subtotal por Registro y gran total.
@@ -1194,16 +1232,6 @@ def write_detalle_por_propiedad(wb, fmt, df: pd.DataFrame, facturas_idx):
               "se omite Detalle por Propiedad.")
         return
 
-    rentas = filter_by_registro(df, reg_col, "renta")
-    propiedades = sorted(
-        p for p in rentas[inm_col].astype(str).str.strip().unique()
-        if p and p.lower() != "nan"
-    )
-    if not propiedades:
-        print("  AVISO: no hay propiedades con Registro='renta'; "
-              "se omite Detalle por Propiedad.")
-        return
-
     data = df.copy()
     data["_reg"] = (data[reg_col].astype(str).str.strip()
                     if reg_col else pd.Series("Sin registro", index=data.index))
@@ -1211,6 +1239,12 @@ def write_detalle_por_propiedad(wb, fmt, df: pd.DataFrame, facturas_idx):
     data["_ing_n"] = clean_numeric(data[ing_col]).fillna(0) if ing_col else 0
     data["_egr_n"] = clean_numeric(data[egr_col]).fillna(0) if egr_col else 0
     data["_fecha"] = parse_dates(data[fecha_col]) if fecha_col else pd.NaT
+
+    propiedades = listar_propiedades(data, reg_col, "_inm")
+    if not propiedades:
+        print("  AVISO: no hay inmuebles con Registro='renta' ni en "
+              "INMUEBLES_SIN_RENTA; se omite Detalle por Propiedad.")
+        return
 
     HDR = ["Año", "Mes", "Ingreso", "Egreso", "Concepto"]
     usados = set(_HOJAS_FIJAS)
@@ -1326,7 +1360,7 @@ def write_detalle_por_propiedad(wb, fmt, df: pd.DataFrame, facturas_idx):
         ws.freeze_panes(4, 0)
 
     print(f"  Hojas generadas: {len(propiedades)} propiedades "
-          f"(Registro='renta') con su historial completo")
+          f"(en renta + INMUEBLES_SIN_RENTA) con su historial completo")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────

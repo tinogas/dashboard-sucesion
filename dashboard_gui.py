@@ -3,7 +3,8 @@
 Panel de control (GUI) para el pipeline de Dashboard Sucesión.
 
 Ejecuta en el orden correcto los pasos definidos en PROCESO.md:
-  1. descargar_facturas_gmail.py (opcional — baja adjuntos nuevos de Gmail a facturas/)
+  1. descargar_facturas_gmail.py (opcional — baja a facturas/ los adjuntos de
+     Gmail del rango de fechas indicado en la GUI)
   2. dashboard.py               (siempre primero — genera dashboard_sucesion.xlsx)
   3. organizar_facturas.py      (opcional — solo si hay CFDIs nuevos en facturas/)
   4. generar_recibos.py         (requiere el Excel del paso 2)
@@ -16,12 +17,15 @@ de la GUI y poder capturar su salida en vivo.
 """
 
 import os
+import re
 import sys
+import json
 import queue
 import threading
 import subprocess
 import traceback
 import tkinter as tk
+from datetime import date, datetime, timedelta
 from tkinter import ttk, messagebox
 
 if getattr(sys, 'frozen', False):
@@ -39,8 +43,18 @@ FACTURAS_DIR   = os.path.join(BASE_DIR, 'facturas')
 FACT_ORG_DIR   = os.path.join(BASE_DIR, 'facturas_organizadas')
 SIN_XML_XLSX   = os.path.join(BASE_DIR, 'facturas_sin_xml.xlsx')
 GMAIL_REPORTE_XLSX = os.path.join(BASE_DIR, 'gmail_facturas_reporte.xlsx')
+GMAIL_REGISTRO_JSON = os.path.join(BASE_DIR, 'gmail_facturas_registro.json')
 CLIENT_SECRET  = os.path.join(BASE_DIR, 'client_secret.json')
 CREDENTIALS    = os.path.join(BASE_DIR, 'credentials.json')
+
+# Formatos aceptados en los campos de fecha del rango de Gmail.
+FORMATOS_FECHA = ('%Y-%m-%d', '%Y/%m/%d', '%d/%m/%Y', '%d-%m-%Y')
+
+# RFC propio: a facturas/ solo van los CFDI donde aparece como emisor o
+# receptor; los de terceros se apartan en revision/otros_rfc/.
+# Vacío = descargar todo sin filtrar.
+RFC_PROPIO_DEFAULT = 'GALF730909CN0'
+RE_RFC = re.compile(r'^[A-ZÑ&]{3,4}\d{6}[A-Z\d]{3}$')
 
 STEPS = [
     {'key': 'facturas_gmail', 'label': 'Descargar Facturas de Gmail',   'default': False},
@@ -54,12 +68,60 @@ STEPS = [
 
 
 # ─────────────────────────────────────────────────────────────
+# Fechas del rango de descarga de Gmail
+# ─────────────────────────────────────────────────────────────
+def parsear_fecha(texto, etiqueta='fecha'):
+    """Texto → date. Acepta AAAA-MM-DD, AAAA/MM/DD y DD/MM/AAAA."""
+    texto = (texto or '').strip()
+    if not texto:
+        raise ValueError(f'Falta la {etiqueta}.')
+    for fmt in FORMATOS_FECHA:
+        try:
+            return datetime.strptime(texto, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f'{etiqueta[:1].upper()}{etiqueta[1:]} inválida: "{texto}". '
+                     'Usa el formato AAAA-MM-DD.')
+
+
+def parsear_rfcs(texto):
+    """'rfc1, rfc2' → lista normalizada en mayúsculas. Vacío = sin filtro."""
+    rfcs = []
+    for parte in re.split(r'[,;\s]+', (texto or '').strip()):
+        if not parte:
+            continue
+        rfc = parte.upper()
+        if not RE_RFC.match(rfc):
+            raise ValueError(f'RFC inválido: "{parte}". Un RFC de persona física tiene '
+                             '13 caracteres (ej. GALF730909CN0) y uno moral 12.')
+        rfcs.append(rfc)
+    return rfcs
+
+
+def fecha_ultima_descarga():
+    """Fecha del correo más reciente ya procesado, para continuar donde quedó
+    la corrida anterior. Si no hay registro, sugiere los últimos 30 días."""
+    try:
+        with open(GMAIL_REGISTRO_JSON, encoding='utf-8') as f:
+            registro = json.load(f)
+        fechas = [r['fecha_correo'][:10] for r in registro.values() if r.get('fecha_correo')]
+        if fechas:
+            return parsear_fecha(max(fechas))
+    except (OSError, ValueError, json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    return date.today() - timedelta(days=30)
+
+
+# ─────────────────────────────────────────────────────────────
 # Ejecución de un paso (corre dentro del proceso hijo)
 # ─────────────────────────────────────────────────────────────
-def run_step(key, reset_recibos=False):
+def run_step(key, reset_recibos=False, gmail_desde=None, gmail_hasta=None, gmail_rfc=None):
     if key == 'facturas_gmail':
         import descargar_facturas_gmail
-        descargar_facturas_gmail.main()
+        opciones = {'fecha_inicio': gmail_desde, 'fecha_fin': gmail_hasta}
+        if gmail_rfc is not None:   # cadena vacía = descargar sin filtrar
+            opciones['rfc_propio'] = gmail_rfc
+        descargar_facturas_gmail.main(**opciones)
     elif key == 'dashboard':
         import dashboard
         dashboard.main()
@@ -82,6 +144,15 @@ def run_step(key, reset_recibos=False):
         raise ValueError(f'Paso desconocido: {key}')
 
 
+def _arg_valor(flag):
+    """Valor que sigue a un flag en sys.argv, o None si no viene."""
+    if flag in sys.argv:
+        idx = sys.argv.index(flag)
+        if idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+    return None
+
+
 def _cli_worker_entry():
     """Si se invocó como --run-step <key>, ejecuta ese paso y termina el proceso
     (sys.exit) sin construir la GUI. Si no se pasó ese flag, no hace nada."""
@@ -96,9 +167,13 @@ def _cli_worker_entry():
     idx = sys.argv.index('--run-step')
     key = sys.argv[idx + 1]
     reset = '--reset' in sys.argv
+    desde = _arg_valor('--desde')
+    hasta = _arg_valor('--hasta')
+    rfc   = _arg_valor('--rfc')
     os.chdir(BASE_DIR)
     try:
-        run_step(key, reset_recibos=reset)
+        run_step(key, reset_recibos=reset, gmail_desde=desde, gmail_hasta=hasta,
+                 gmail_rfc=rfc)
     except SystemExit as e:
         code = e.code if isinstance(e.code, int) else (1 if e.code else 0)
         sys.exit(code)
@@ -153,12 +228,20 @@ class App(tk.Tk):
             status.pack(side='right', padx=6)
             self.step_status_labels[step['key']] = status
 
+            if step['key'] == 'facturas_gmail':
+                self._build_rango_gmail(row)
+                self._build_rfc_gmail(steps_frame)
+
             if step['key'] == 'recibos':
                 self.reset_recibos_var = tk.BooleanVar(value=False)
                 ttk.Checkbutton(
                     row, text='Reiniciar numeración (borra historial)',
                     variable=self.reset_recibos_var,
                 ).pack(side='left', padx=16)
+
+        self.step_vars['facturas_gmail'].trace_add(
+            'write', lambda *_: self._sync_rango_gmail())
+        self._sync_rango_gmail()
 
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill='x', **pad)
@@ -201,6 +284,67 @@ class App(tk.Tk):
                   self.btn_facturas, self.btn_sin_xml, self.btn_gmail):
             b.pack(side='left', padx=6, pady=6)
 
+    def _build_rango_gmail(self, row):
+        """Campos del rango de fechas (inclusive) para la descarga de Gmail.
+
+        Por defecto propone continuar desde el correo más reciente ya
+        descargado hasta hoy.
+        """
+        self.gmail_desde_var = tk.StringVar(value=fecha_ultima_descarga().isoformat())
+        self.gmail_hasta_var = tk.StringVar(value=date.today().isoformat())
+
+        ttk.Label(row, text='Rango:').pack(side='left', padx=(18, 4))
+        self.gmail_desde_entry = ttk.Entry(
+            row, textvariable=self.gmail_desde_var, width=11, justify='center')
+        self.gmail_desde_entry.pack(side='left')
+        ttk.Label(row, text='→').pack(side='left', padx=4)
+        self.gmail_hasta_entry = ttk.Entry(
+            row, textvariable=self.gmail_hasta_var, width=11, justify='center')
+        self.gmail_hasta_entry.pack(side='left')
+        ttk.Label(row, text='AAAA-MM-DD (fin vacío = sin límite)',
+                  foreground='gray').pack(side='left', padx=8)
+
+    def _build_rfc_gmail(self, steps_frame):
+        """Segunda línea del paso 1: RFC propio para separar las facturas de
+        terceros de las que sí son tuyas (las emitas o las recibas)."""
+        sub = ttk.Frame(steps_frame)
+        sub.pack(fill='x', pady=(0, 2))
+
+        self.gmail_rfc_var = tk.StringVar(value=RFC_PROPIO_DEFAULT)
+        ttk.Label(sub, text='Mi RFC:').pack(side='left', padx=(24, 4))
+        self.gmail_rfc_entry = ttk.Entry(sub, textvariable=self.gmail_rfc_var, width=32)
+        self.gmail_rfc_entry.pack(side='left')
+        ttk.Label(sub, text='como emisor o receptor · varios con coma · vacío = todas',
+                  foreground='gray').pack(side='left', padx=8)
+
+    def _sync_rango_gmail(self):
+        """Los campos del paso 1 solo se editan si ese paso está marcado."""
+        estado = 'normal' if self.step_vars['facturas_gmail'].get() else 'disabled'
+        self.gmail_desde_entry.config(state=estado)
+        self.gmail_hasta_entry.config(state=estado)
+        self.gmail_rfc_entry.config(state=estado)
+
+    def _opciones_gmail(self):
+        """Rango y RFC ya validados para el paso de Gmail.
+
+        'hasta' es None si no hay límite superior; 'rfc' es una cadena vacía
+        cuando el usuario decide no filtrar. Lanza ValueError si algo no sirve.
+        """
+        desde = parsear_fecha(self.gmail_desde_var.get(),
+                              'fecha inicial del rango de Gmail')
+        texto_hasta = self.gmail_hasta_var.get().strip()
+        hasta = parsear_fecha(texto_hasta, 'fecha final del rango de Gmail') if texto_hasta else None
+        if hasta and hasta < desde:
+            raise ValueError(
+                'El rango de fechas de Gmail está invertido: la fecha final '
+                f'({hasta:%Y-%m-%d}) es anterior a la inicial ({desde:%Y-%m-%d}).'
+            )
+        return {
+            'desde': desde.isoformat(),
+            'hasta': hasta.isoformat() if hasta else None,
+            'rfc': ','.join(parsear_rfcs(self.gmail_rfc_var.get())),
+        }
+
     def _abrir(self, path):
         if os.path.exists(path):
             os.startfile(path)
@@ -220,11 +364,16 @@ class App(tk.Tk):
     def _validar_prerrequisitos(self, seleccionados):
         errores = []
 
-        if 'facturas_gmail' in seleccionados and not os.path.exists(CLIENT_SECRET):
-            errores.append(
-                'Falta client_secret.json (credencial OAuth de escritorio de Google Cloud), '
-                'necesario para "Descargar Facturas de Gmail".'
-            )
+        if 'facturas_gmail' in seleccionados:
+            if not os.path.exists(CLIENT_SECRET):
+                errores.append(
+                    'Falta client_secret.json (credencial OAuth de escritorio de Google Cloud), '
+                    'necesario para "Descargar Facturas de Gmail".'
+                )
+            try:
+                self._opciones_gmail()
+            except ValueError as e:
+                errores.append(str(e))
 
         necesita_credenciales = ('dashboard' in seleccionados or 'reporte' in seleccionados
                                   or 'reporte_propiedades' in seleccionados)
@@ -294,13 +443,17 @@ class App(tk.Tk):
             ):
                 return
 
+        # Las opciones se leen aquí (hilo de la GUI); tkinter no es thread-safe.
+        gmail = self._opciones_gmail() if 'facturas_gmail' in seleccionados else None
+
         self._set_running(True, total_steps=len(seleccionados))
         self._clear_log()
         for step in STEPS:
             self.step_status_labels[step['key']].config(text='pendiente', foreground='gray')
 
         thread = threading.Thread(
-            target=self._worker, args=(seleccionados, self.reset_recibos_var.get()),
+            target=self._worker,
+            args=(seleccionados, self.reset_recibos_var.get(), gmail),
             daemon=True,
         )
         thread.start()
@@ -314,14 +467,14 @@ class App(tk.Tk):
             self.progress['maximum'] = total_steps
 
     # ---------- worker (hilo secundario) ----------
-    def _worker(self, seleccionados, reset_recibos):
+    def _worker(self, seleccionados, reset_recibos, gmail=None):
         ok = True
         for key in seleccionados:
             self.msg_queue.put(('status', key, 'ejecutando…'))
             label = next(s['label'] for s in STEPS if s['key'] == key)
             self.msg_queue.put(('log', f'\n=== {label} ===\n', None))
 
-            cmd = self._build_cmd(key, reset_recibos)
+            cmd = self._build_cmd(key, reset_recibos, gmail)
             try:
                 creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
                 proc = subprocess.Popen(
@@ -351,13 +504,20 @@ class App(tk.Tk):
 
         self.msg_queue.put(('finished', ok, None))
 
-    def _build_cmd(self, key, reset_recibos):
+    def _build_cmd(self, key, reset_recibos, gmail=None):
         if getattr(sys, 'frozen', False):
             cmd = [sys.executable, '--run-step', key]
         else:
             cmd = [sys.executable, '-u', os.path.abspath(__file__), '--run-step', key]
         if key == 'recibos' and reset_recibos:
             cmd.append('--reset')
+        if key == 'facturas_gmail' and gmail:
+            if gmail['desde']:
+                cmd += ['--desde', gmail['desde']]
+            if gmail['hasta']:
+                cmd += ['--hasta', gmail['hasta']]
+            # Siempre se manda: la cadena vacía significa "sin filtro de RFC".
+            cmd += ['--rfc', gmail['rfc']]
         return cmd
 
     # ---------- cola de mensajes → UI ----------
