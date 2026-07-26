@@ -1,0 +1,14 @@
+[
+  {
+    "origen": "facturas_organizadas\\2025\\09_Septiembre\\AUTOTRANSPORTES TUFESA\\628278B0-3B75-4539-88DB-9D36542C4FF7.xml",
+    "destino": "revision\\otros_rfc\\628278B0-3B75-4539-88DB-9D36542C4FF7.xml",
+    "emisor": "ATU940621PU7",
+    "receptor": "GES790913CT0"
+  },
+  {
+    "origen": "facturas_organizadas\\2025\\09_Septiembre\\AUTOTRANSPORTES TUFESA\\628278B0-3B75-4539-88DB-9D36542C4FF7.pdf",
+    "destino": "revision\\otros_rfc\\628278B0-3B75-4539-88DB-9D36542C4FF7.pdf",
+    "emisor": "ATU940621PU7",
+    "receptor": "GES790913CT0"
+  }
+]
