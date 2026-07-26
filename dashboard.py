@@ -1079,6 +1079,7 @@ def _nombre_hoja_valido(nombre: str, usados: set) -> str:
 # lista sin ningún efecto.
 INMUEBLES_SIN_RENTA = {
     'Toledo 2101-A',
+    'Toledo 2103-B',
 }
 
 
