@@ -21,6 +21,28 @@ Sistema de administración contable para una sucesión de inmuebles. Lee los mov
 
 ## Orden de ejecución
 
+### Paso 0 — `descargar_facturas_gmail.py` *(opcional)*
+
+Revisa el Gmail de la cuenta configurada y descarga a `facturas/` los adjuntos PDF/XML de correos con posibles CFDI, dentro de un rango de fechas.
+
+| | |
+|---|---|
+| **Requiere** | `client_secret.json` (credencial OAuth de escritorio de Google Cloud) |
+| **Salida** | Archivos en `facturas/` |
+| **Salida** | `gmail_facturas_reporte.xlsx` (bitácora de correos revisados) |
+| **Salida** | `gmail_facturas_registro.json` (historial interno, evita reprocesar correos) |
+
+- El rango de fechas (`--desde`/`--hasta`, inclusive) se elige en `dashboard_gui.py` o por línea de comandos; sin `--hasta` no hay límite superior.
+- Solo se guardan en `facturas/` los CFDI donde el RFC propio (`--rfc`, varios separados por coma) aparece como **emisor o receptor** — las facturas de renta que se emiten a los inquilinos cuentan igual que las que se reciben. Con `--rfc ""` se descarga todo sin filtrar.
+- Los CFDI de terceros (el RFC propio no participa) se apartan en `revision/otros_rfc/` sin borrarse.
+- Correos incompletos (falta PDF o XML) van a `revision/`.
+
+```
+python descargar_facturas_gmail.py --desde 2026-07-01 --hasta 2026-07-24 --rfc GALF730909CN0
+```
+
+---
+
 ### Paso 1 — `dashboard.py`
 
 Descarga los movimientos de Google Sheets y genera el archivo Excel principal con todas las hojas analíticas.
@@ -45,6 +67,7 @@ Descarga los movimientos de Google Sheets y genera el archivo Excel principal co
 | Control Agua | Pivote Inmueble × Mes (egresos) |
 | Control Despacho | Pivote Inquilino × Mes + resumen por concepto |
 | Control Impuestos | Pivote Inmueble × Mes (egresos) |
+| Detalle por Propiedad | Una hoja por cada inmueble en renta, más los listados en `INMUEBLES_SIN_RENTA` (inmuebles sin ingresos de renta pero con gastos propios, ej. luz/predial de una casa desocupada) |
 
 Al terminar, abre el archivo automáticamente en Excel.
 
@@ -111,6 +134,17 @@ Al terminar, abre el documento automáticamente en Word.
 
 ---
 
+### Paso 5 — `reporte_word_propiedades.py` *(opcional)*
+
+Genera un reporte Word independiente con un salto de página por cada inmueble (en renta o en `INMUEBLES_SIN_RENTA`): su bitácora completa por categoría (Renta, Luz, Agua, Predial, Mantenimiento, Impuestos, etc.) y el detalle de productos de cada factura XML relacionada.
+
+| | |
+|---|---|
+| **Requiere** | Google Sheets + `dashboard_sucesion.xlsx` |
+| **Salida** | `reporte_propiedades.docx` |
+
+---
+
 ## Flujo de datos
 
 ```
@@ -134,6 +168,7 @@ Google Sheets (movimientos)
 ## Utilidades
 
 - **`diagnostico_recibos.py`** — Solo imprime en consola. Útil para verificar datos del Excel y el JSON de recibos sin generar ningún archivo.
+- **`mover_facturas_otros_rfc.py`** — Aparta en `revision/otros_rfc/` las facturas ya descargadas (en `facturas/` o `facturas_organizadas/`) donde el RFC propio no participa ni como emisor ni como receptor. Útil para limpiar retroactivamente lo descargado antes de que `descargar_facturas_gmail.py` filtrara por RFC. Corre en modo simulación por defecto; usa `--aplicar` para mover de verdad y `--deshacer` para revertir (se apoya en `movidos_otros_rfc.json`).
 
 ---
 
