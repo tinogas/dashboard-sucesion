@@ -173,12 +173,10 @@ def generate_report(df: pd.DataFrame, output: str):
     data["_fecha"] = dash.parse_dates(data[fecha_col]) if fecha_col else pd.NaT
     data = dash._expandir_inmuebles_combinados(data)
 
-    rentas = dash.filter_by_registro(data, reg_col, "renta")
-    propiedades = sorted(
-        p for p in rentas["_inm"].unique() if p and p.lower() != "nan"
-    )
+    propiedades = dash.listar_propiedades(data, reg_col, "_inm")
     if not propiedades:
-        print("ERROR: no hay propiedades con Registro='renta'.")
+        print("ERROR: no hay inmuebles con Registro='renta' ni en "
+              "dash.INMUEBLES_SIN_RENTA.")
         sys.exit(1)
 
     print(f"  Propiedades encontradas: {len(propiedades)}")
