@@ -1,7 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 Revisa el Gmail de tinogas@gmail.com y descarga los adjuntos PDF/XML de
-correos que puedan contener facturas (CFDI), desde FECHA_INICIO a la fecha.
+correos que puedan contener facturas (CFDI) dentro de un rango de fechas.
+
+El rango se elige desde el panel de control (dashboard_gui.py) o por línea
+de comandos:
+
+    python descargar_facturas_gmail.py --desde 2026-07-01 --hasta 2026-07-24
+
+Si no se indica --desde se usa FECHA_INICIO_DEFAULT; si no se indica --hasta
+no hay límite superior (llega hasta el correo más reciente).
+
+A facturas/ solo entran los CFDI en los que participa el RFC propio (--rfc,
+por defecto RFC_PROPIO_DEFAULT), ya sea como emisor o como receptor: las
+facturas de renta emitidas a los inquilinos cuentan igual que las recibidas.
+Las de terceros se apartan en revision/otros_rfc/ sin borrarse; con --rfc ""
+se descarga todo sin filtrar.
 
 Los archivos se guardan en facturas/ para que organizar_facturas.py los
 procese después.
@@ -17,7 +31,9 @@ import re
 import json
 import base64
 import time
-from datetime import datetime, timezone
+import argparse
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone, timedelta, date
 from email.header import decode_header
 
 from google.oauth2.credentials import Credentials
@@ -43,22 +59,158 @@ CLIENT_SECRET    = os.path.join(BASE_DIR, 'client_secret.json')
 TOKEN_PATH       = os.path.join(BASE_DIR, 'token.json')
 FACTURAS_DIR     = os.path.join(BASE_DIR, 'facturas')
 REVISION_DIR     = os.path.join(BASE_DIR, 'revision')
+OTROS_RFC_DIR    = os.path.join(REVISION_DIR, 'otros_rfc')
 REGISTRO_JSON    = os.path.join(BASE_DIR, 'gmail_facturas_registro.json')
 REPORTE_XLSX     = os.path.join(BASE_DIR, 'gmail_facturas_reporte.xlsx')
 
-SCOPES       = ['https://www.googleapis.com/auth/gmail.readonly']
-FECHA_INICIO = '2025/09/01'   # septiembre 2025
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
-# Búsqueda amplia: cualquier correo (bandeja, archivados, etiquetas) con
-# adjunto PDF o XML desde FECHA_INICIO. No se restringe por palabra clave
-# porque muchas facturas no traen "factura" en el asunto; el filtrado real
-# de qué es CFDI válido lo hace organizar_facturas.py al leer cada archivo.
-QUERY = f'after:{FECHA_INICIO} has:attachment (filename:pdf OR filename:xml)'
+# Fecha usada cuando no se recibe un rango (primer correo con factura del
+# histórico). Normalmente la GUI manda el rango elegido por el usuario.
+FECHA_INICIO_DEFAULT = '2025/09/01'
+
+# Filtro base: cualquier correo (bandeja, archivados, etiquetas) con adjunto
+# PDF o XML. No se restringe por palabra clave porque muchas facturas no traen
+# "factura" en el asunto; el filtrado real de qué es CFDI válido lo hace
+# organizar_facturas.py al leer cada archivo.
+FILTRO_ADJUNTOS = 'has:attachment (filename:pdf OR filename:xml)'
+
+FORMATOS_FECHA = ('%Y-%m-%d', '%Y/%m/%d', '%d/%m/%Y', '%d-%m-%Y')
+
+# RFC propio: solo se guardan en facturas/ los CFDI donde este RFC aparece
+# como emisor o como receptor. La GUI puede mandar otros (varios separados por
+# coma) y si llega vacío no se filtra nada.
+RFC_PROPIO_DEFAULT = 'GALF730909CN0'
+RE_RFC = re.compile(r'^[A-ZÑ&]{3,4}\d{6}[A-Z\d]{3}$')
 
 EXTENSIONES_VALIDAS = ('.pdf', '.xml')
 
 COLOR_HDR = '1F4E79'
 COLOR_ALT = 'EBF5FB'
+
+
+# ──────────────────────────────────────────────
+# Rango de fechas
+# ──────────────────────────────────────────────
+def normalizar_fecha(valor, etiqueta='fecha'):
+    """Convierte un texto de fecha a date. Acepta AAAA-MM-DD, AAAA/MM/DD y
+    DD/MM/AAAA; también deja pasar objetos date/datetime tal cual."""
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+
+    texto = str(valor).strip()
+    if not texto:
+        raise ValueError(f'La {etiqueta} está vacía.')
+    for fmt in FORMATOS_FECHA:
+        try:
+            return datetime.strptime(texto, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f'{etiqueta[:1].upper()}{etiqueta[1:]} inválida: "{texto}" (usa AAAA-MM-DD).')
+
+
+def construir_query(fecha_inicio, fecha_fin=None):
+    """Arma el query de Gmail para el rango [fecha_inicio, fecha_fin] inclusive.
+
+    Gmail trata before: como exclusivo, por eso se le suma un día al fin: así
+    los correos del último día del rango sí quedan dentro.
+    """
+    ini = normalizar_fecha(fecha_inicio, 'fecha inicial')
+    partes = [f'after:{ini:%Y/%m/%d}']
+
+    if fecha_fin:
+        fin = normalizar_fecha(fecha_fin, 'fecha final')
+        if fin < ini:
+            raise ValueError(
+                f'El rango está invertido: la fecha final ({fin:%Y-%m-%d}) es '
+                f'anterior a la inicial ({ini:%Y-%m-%d}).'
+            )
+        partes.append(f'before:{fin + timedelta(days=1):%Y/%m/%d}')
+
+    partes.append(FILTRO_ADJUNTOS)
+    return ' '.join(partes)
+
+
+# ──────────────────────────────────────────────
+# RFC propio (emisor o receptor)
+# ──────────────────────────────────────────────
+def normalizar_rfcs(valor):
+    """'rfc1, rfc2' (o una lista) → set de RFC en mayúsculas. Vacío = sin filtro."""
+    if not valor:
+        return set()
+    if isinstance(valor, str):
+        partes = re.split(r'[,;\s]+', valor)
+    else:
+        partes = list(valor)
+
+    rfcs = set()
+    for p in partes:
+        rfc = str(p).strip().upper()
+        if not rfc:
+            continue
+        if not RE_RFC.match(rfc):
+            raise ValueError(f'RFC inválido: "{rfc}".')
+        rfcs.add(rfc)
+    return rfcs
+
+
+def rfcs_de_xml(contenido):
+    """(RFC emisor, RFC receptor) de un CFDI. (None, None) si no se puede leer."""
+    try:
+        root = ET.fromstring(contenido.lstrip(b'\xef\xbb\xbf') if isinstance(contenido, bytes)
+                             else contenido)
+    except ET.ParseError:
+        return None, None
+
+    emisor = receptor = None
+    for el in root.iter():
+        tag = el.tag.rsplit('}', 1)[-1]
+        if tag == 'Emisor' and emisor is None:
+            emisor = (el.get('Rfc') or el.get('rfc') or '').strip().upper() or None
+        elif tag == 'Receptor' and receptor is None:
+            receptor = (el.get('Rfc') or el.get('rfc') or '').strip().upper() or None
+        if emisor and receptor:
+            break
+    return emisor, receptor
+
+
+def clasificar_correo(adjuntos, rfcs_permitidos):
+    """Decide a qué carpeta va un correo completo (sus adjuntos no se separan).
+
+    Un CFDI se considera propio si el RFC aparece como emisor o como receptor:
+    las facturas de renta que emites a tus inquilinos son tan tuyas como las
+    que te emiten a ti.
+
+    Devuelve (carpeta, etiqueta, rfcs_emisores, rfcs_receptores).
+      Factura   → PDF + XML y, si hay filtro, tu RFC participa en el CFDI.
+      Otro RFC  → en ningún CFDI del correo participa tu RFC.
+      Revisión  → falta PDF o XML, o no se pudo leer el RFC habiendo filtro.
+    """
+    emisores, receptores = set(), set()
+    for a in adjuntos:
+        if not a['filename'].lower().endswith('.xml'):
+            continue
+        emisor, receptor = rfcs_de_xml(a['contenido'])
+        if emisor:
+            emisores.add(emisor)
+        if receptor:
+            receptores.add(receptor)
+    participantes = emisores | receptores
+
+    tiene_pdf = any(a['filename'].lower().endswith('.pdf') for a in adjuntos)
+    tiene_xml = any(a['filename'].lower().endswith('.xml') for a in adjuntos)
+    completo  = tiene_pdf and tiene_xml
+
+    if rfcs_permitidos and participantes and not (participantes & rfcs_permitidos):
+        return OTROS_RFC_DIR, 'Otro RFC', emisores, receptores
+    if rfcs_permitidos and completo and not participantes:
+        # Con filtro activo, a facturas/ solo entra lo que se pudo verificar.
+        return REVISION_DIR, 'Revisión', emisores, receptores
+    if completo:
+        return FACTURAS_DIR, 'Factura', emisores, receptores
+    return REVISION_DIR, 'Revisión', emisores, receptores
 
 
 # ──────────────────────────────────────────────
@@ -187,10 +339,21 @@ COLS = [
     ('Tipo',           6),
     ('Carpeta',       12),
     ('Enlace Gmail',  20),
+    ('RFC emisor',    16),   # al final para no desalinear reportes ya generados
+    ('RFC receptor',  16),
 ]
+
+COL_ENLACE = 7
 
 COLOR_FACTURA  = 'D5F5E3'   # verde: pdf + xml juntos
 COLOR_REVISION = 'FEF9E7'   # amarillo: falta pdf o xml
+COLOR_OTRO_RFC = 'EAEDED'   # gris: CFDI emitido a otro RFC
+
+COLORES_CARPETA = {
+    'Factura':  COLOR_FACTURA,
+    'Revisión': COLOR_REVISION,
+    'Otro RFC': COLOR_OTRO_RFC,
+}
 
 
 def generar_reporte(filas_nuevas):
@@ -204,6 +367,12 @@ def generar_reporte(filas_nuevas):
         wb = openpyxl.load_workbook(REPORTE_XLSX)
         ws = wb['Correos'] if 'Correos' in wb.sheetnames else wb.active
         fila_inicio = ws.max_row + 1
+        # Reportes de versiones anteriores no traen la columna de RFC.
+        for ci, (nombre, ancho) in enumerate(COLS, 1):
+            if ws.cell(1, ci).value != nombre:
+                c = ws.cell(1, ci, nombre)
+                c.font, c.fill, c.alignment, c.border = hdr_font, hdr_fill, hdr_align, border
+                ws.column_dimensions[get_column_letter(ci)].width = ancho
     else:
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -217,14 +386,16 @@ def generar_reporte(filas_nuevas):
 
     for i, fila in enumerate(filas_nuevas):
         ri = fila_inicio + i
-        fill = PatternFill('solid', fgColor=COLOR_FACTURA if fila['carpeta'] == 'Factura' else COLOR_REVISION)
+        fill = PatternFill('solid',
+                           fgColor=COLORES_CARPETA.get(fila['carpeta'], COLOR_REVISION))
         valores = [fila['fecha'], fila['remitente'], fila['asunto'],
-                   fila['archivo'], fila['tipo'], fila['carpeta'], 'Abrir correo']
+                   fila['archivo'], fila['tipo'], fila['carpeta'], 'Abrir correo',
+                   fila.get('rfc_emisor', ''), fila.get('rfc_receptor', '')]
         for ci, val in enumerate(valores, 1):
             c = ws.cell(ri, ci, val)
             c.fill, c.border = fill, border
             c.alignment = Alignment(vertical='center', wrap_text=False)
-        link_cell = ws.cell(ri, 7)
+        link_cell = ws.cell(ri, COL_ENLACE)
         link_cell.hyperlink = fila['enlace']
         link_cell.font = Font(color='1155CC', underline='single')
 
@@ -236,24 +407,42 @@ def generar_reporte(filas_nuevas):
 # ──────────────────────────────────────────────
 # Programa principal
 # ──────────────────────────────────────────────
-def main():
+def main(fecha_inicio=None, fecha_fin=None, rfc_propio=RFC_PROPIO_DEFAULT):
+    """Descarga los adjuntos de los correos del rango indicado.
+
+    fecha_inicio / fecha_fin son inclusivas y aceptan AAAA-MM-DD, AAAA/MM/DD o
+    DD/MM/AAAA. Sin fecha_inicio se usa FECHA_INICIO_DEFAULT; sin fecha_fin no
+    hay límite superior.
+
+    rfc_propio limita facturas/ a los CFDI donde ese RFC participa como emisor
+    o receptor (uno o varios separados por coma). Con cadena vacía o None se
+    descarga todo sin filtrar.
+    """
+    ini = normalizar_fecha(fecha_inicio or FECHA_INICIO_DEFAULT, 'fecha inicial')
+    fin = normalizar_fecha(fecha_fin, 'fecha final') if fecha_fin else None
+    query = construir_query(ini, fin)
+    rfcs_permitidos = normalizar_rfcs(rfc_propio)
+
     print('=' * 60)
     print('  Descarga de Facturas desde Gmail')
     print(f'  Cuenta: {CUENTA_GMAIL}')
-    print(f'  Desde:  {FECHA_INICIO}')
+    print(f'  Desde:  {ini:%Y-%m-%d}')
+    print(f'  Hasta:  {fin:%Y-%m-%d}' if fin else '  Hasta:  (sin límite, hasta el correo más reciente)')
+    print(f'  RFC:    {", ".join(sorted(rfcs_permitidos))}' if rfcs_permitidos
+          else '  RFC:    (sin filtro, se descargan todas las facturas)')
     print('=' * 60)
 
     servicio = obtener_servicio_gmail()
     registro = cargar_registro()
 
     # ── Listar mensajes que cumplen el filtro ──────────────────────
-    print(f'\nBuscando correos: {QUERY}')
+    print(f'\nBuscando correos: {query}')
     mensajes = []
     page_token = None
     while True:
         resp = _con_reintentos(
             servicio.users().messages().list(
-                userId='me', q=QUERY, maxResults=500, pageToken=page_token
+                userId='me', q=query, maxResults=500, pageToken=page_token
             ).execute
         )
         mensajes.extend(resp.get('messages', []))
@@ -272,7 +461,7 @@ def main():
         return
 
     filas_reporte = []
-    total_pdf = total_xml = 0
+    total_pdf = total_xml = correos_otro_rfc = 0
 
     for i, msg_ref in enumerate(nuevos, 1):
         msg_id = msg_ref['id']
@@ -299,28 +488,31 @@ def main():
         adjuntos = []
         _extraer_adjuntos(partes, adjuntos)
 
-        # Un correo solo cuenta como "Factura" si trae PDF y XML juntos;
-        # si falta alguno de los dos, todos sus adjuntos van a revisión
-        # manual en vez de a facturas/.
-        tiene_pdf = any(a['filename'].lower().endswith('.pdf') for a in adjuntos)
-        tiene_xml = any(a['filename'].lower().endswith('.xml') for a in adjuntos)
-        es_factura = tiene_pdf and tiene_xml
-        carpeta_dest = FACTURAS_DIR if es_factura else REVISION_DIR
-        etiqueta_carpeta = 'Factura' if es_factura else 'Revisión'
-
-        archivos_guardados = []
+        # El contenido se baja antes de elegir carpeta: el RFC del receptor
+        # solo se conoce leyendo el XML.
         for adj in adjuntos:
             if adj['data']:
-                contenido = _decodificar_b64(adj['data'])
+                adj['contenido'] = _decodificar_b64(adj['data'])
             else:
                 att = _con_reintentos(
                     servicio.users().messages().attachments().get(
                         userId='me', messageId=msg_id, id=adj['attachmentId']
                     ).execute
                 )
-                contenido = _decodificar_b64(att['data'])
+                adj['contenido'] = _decodificar_b64(att['data'])
 
-            destino = _guardar_sin_sobrescribir(contenido, adj['filename'], carpeta_dest)
+        # Un correo solo cuenta como "Factura" si trae PDF y XML juntos y el
+        # CFDI está a nombre de un RFC propio; lo demás va a revisión manual.
+        carpeta_dest, etiqueta_carpeta, emisores, receptores = clasificar_correo(
+            adjuntos, rfcs_permitidos)
+        rfc_emisor_str   = ', '.join(sorted(emisores))
+        rfc_receptor_str = ', '.join(sorted(receptores))
+        if etiqueta_carpeta == 'Otro RFC':
+            correos_otro_rfc += 1
+
+        archivos_guardados = []
+        for adj in adjuntos:
+            destino = _guardar_sin_sobrescribir(adj['contenido'], adj['filename'], carpeta_dest)
             archivos_guardados.append(os.path.basename(destino))
 
             tipo = 'PDF' if destino.lower().endswith('.pdf') else 'XML'
@@ -337,6 +529,8 @@ def main():
                 'tipo': tipo,
                 'carpeta': etiqueta_carpeta,
                 'enlace': f'https://mail.google.com/mail/u/0/#all/{msg_id}',
+                'rfc_emisor': rfc_emisor_str,
+                'rfc_receptor': rfc_receptor_str,
             })
 
         registro[msg_id] = {
@@ -345,6 +539,8 @@ def main():
             'remitente': remitente,
             'asunto': asunto,
             'carpeta': etiqueta_carpeta,
+            'rfc_emisor': rfc_emisor_str,
+            'rfc_receptor': rfc_receptor_str,
             'archivos': archivos_guardados,
         }
 
@@ -364,14 +560,39 @@ def main():
 
     correos_factura   = sum(1 for r in registro.values() if r.get('carpeta') == 'Factura' and r['archivos'])
     correos_revision  = sum(1 for r in registro.values() if r.get('carpeta') == 'Revisión' and r['archivos'])
+    total_otro_rfc    = sum(1 for r in registro.values() if r.get('carpeta') == 'Otro RFC' and r['archivos'])
 
     print(f'\nArchivos descargados: {total_pdf} PDF, {total_xml} XML')
     print(f'  Correos con PDF+XML completos -> {FACTURAS_DIR}  ({correos_factura} correos)')
     print(f'  Correos incompletos (falta PDF o XML) -> {REVISION_DIR}  ({correos_revision} correos)')
+    if rfcs_permitidos:
+        print(f'  Facturas de otro RFC -> {OTROS_RFC_DIR}  '
+              f'({correos_otro_rfc} correos nuevos, {total_otro_rfc} en total)')
     print('\nSiguiente paso: ejecuta organizar_facturas.py para clasificar lo que quedó en facturas/.')
     print('Revisa manualmente la carpeta revision/ para decidir qué hacer con esos correos.')
     print('=' * 60)
 
 
+def _parsear_argumentos():
+    p = argparse.ArgumentParser(
+        description='Descarga adjuntos PDF/XML de facturas desde Gmail.')
+    p.add_argument('--desde', dest='desde', default=None,
+                   help='Fecha inicial inclusive (AAAA-MM-DD). '
+                        f'Por defecto {FECHA_INICIO_DEFAULT}.')
+    p.add_argument('--hasta', dest='hasta', default=None,
+                   help='Fecha final inclusive (AAAA-MM-DD). '
+                        'Por defecto sin límite superior.')
+    p.add_argument('--rfc', dest='rfc', default=RFC_PROPIO_DEFAULT,
+                   help='RFC propio (cuenta como emisor o receptor); varios '
+                        f'separados por coma. Por defecto {RFC_PROPIO_DEFAULT}. '
+                        'Usa --rfc "" para descargar sin filtrar.')
+    return p.parse_args()
+
+
 if __name__ == '__main__':
-    main()
+    args = _parsear_argumentos()
+    try:
+        main(fecha_inicio=args.desde, fecha_fin=args.hasta, rfc_propio=args.rfc)
+    except ValueError as e:
+        print(f'ERROR: {e}')
+        sys.exit(1)
